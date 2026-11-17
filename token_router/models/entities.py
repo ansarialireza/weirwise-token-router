@@ -166,3 +166,23 @@ class UsageRecord(Base):
 
     consumer = relationship("Consumer", back_populates="usage_records")
     credential = relationship("ProviderCredential", back_populates="usage_records")
+
+
+class WebhookEvent(Base):
+    """Persistent ledger for inbound webhook events across providers."""
+
+    __tablename__ = "webhook_events"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider_name = Column(String(50), nullable=False, index=True)
+    external_event_id = Column(String(255), nullable=True, index=True)
+    event_type = Column(String(100), nullable=False, index=True)
+
+    # Lifecycle state: received -> verified -> queued -> processed -> failed -> dead_letter
+    status = Column(String(50), default="received", nullable=False, index=True)
+    payload = Column(UniversalJSON, default=dict, nullable=False)
+    error_message = Column(Text, nullable=True)
+    retry_count = Column(Integer, default=0, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)

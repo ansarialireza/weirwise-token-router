@@ -60,6 +60,7 @@ class MCPServer:
                         "request": {"type": "object", "description": "Operation payload dictionary"},
                         "strategy": {"type": "string", "description": "priority, round_robin, weighted, lowest_cost"},
                         "idempotency_key": {"type": "string", "description": "Optional unique idempotency key"},
+                        "approval_id": {"type": "string", "description": "Approval ID for sensitive operations"},
                     },
                 },
             },
@@ -119,7 +120,7 @@ class MCPServer:
                 }
 
             elif tool_name == "execute_request":
-                # For local MCP execution, construct a default internal consumer if not found
+                # Extract consumer identity or construct scoped agent session
                 mock_consumer = Consumer(
                     id="mcp-agent-session",
                     name="mcp_autonomous_agent",
@@ -136,6 +137,7 @@ class MCPServer:
                     provider_name=arguments.get("provider"),
                     strategy=arguments.get("strategy"),
                     idempotency_key=arguments.get("idempotency_key"),
+                    approval_id=arguments.get("approval_id"),
                 )
                 return res
 

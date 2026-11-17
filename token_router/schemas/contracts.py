@@ -110,6 +110,7 @@ class RouteRequest(BaseModel):
     max_failover_attempts: int = 3
     strategy: Optional[str] = None  # Override strategy (priority, round_robin, weighted, etc.)
     idempotency_key: Optional[str] = None
+    approval_id: Optional[str] = None  # Required if operation requires_approval=True
 
 
 class RouteResponse(BaseModel):

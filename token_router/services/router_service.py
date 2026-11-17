@@ -57,6 +57,7 @@ class TokenRouterService:
         max_failover_attempts: int = 3,
         timeout_seconds: Optional[float] = None,
         idempotency_key: Optional[str] = None,
+        approval_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Shared execution pipeline for REST, MCP, and CLI with safety semantics."""
         # 1. Check consumer permissions
@@ -73,6 +74,10 @@ class TokenRouterService:
                     break
             if op_def:
                 break
+
+        # ENFORCE APPROVAL AT CORE EXECUTION BOUNDARY
+        if op_def and op_def.safety.requires_approval:
+            ApprovalManager.verify_and_consume_approval(approval_id=approval_id, action_type=op_def.id)
 
         allows_failover = True
         if op_def and not op_def.safety.allows_automatic_failover:
@@ -92,6 +97,7 @@ class TokenRouterService:
         failover_attempts = 0
         last_error = None
         last_status = 502
+        attempted_cred_ids = set()
 
         for provider in providers:
             adapter = get_adapter(provider.name)
@@ -101,10 +107,12 @@ class TokenRouterService:
                     provider=provider,
                     model=model,
                     strategy=strategy,
+                    exclude_credential_ids=attempted_cred_ids,
                 )
                 if not cred:
                     break
 
+                attempted_cred_ids.add(cred.id)
                 secret = vault.decrypt(cred.encrypted_secret)
                 start_time = time.perf_counter()
 
@@ -168,8 +176,11 @@ class TokenRouterService:
                     last_status = status_code
                     last_error = response_data
                     if not allows_failover:
-                        # Break immediately if failover forbidden (e.g. Stripe charge)
-                        break
+                        # CRITICAL: When failover is forbidden, NEVER try another credential OR provider!
+                        raise RuntimeError(
+                            f"Operation '{capability}' failed on provider '{provider.name}' with status {status_code}: {response_data}. "
+                            "Automatic failover is strictly disabled for non-idempotent/financial operations."
+                        )
                     failover_attempts += 1
 
                 except Exception as e:
@@ -181,8 +192,15 @@ class TokenRouterService:
                     )
                     last_error = {"error": str(e)}
                     if not allows_failover:
-                        break
+                        # CRITICAL: Prevent cross-provider fallback on timeouts or 5xx
+                        raise RuntimeError(
+                            f"Operation '{capability}' failed on provider '{provider.name}': {str(e)}. "
+                            "Cross-provider failover is strictly prohibited for non-failover-safe operations."
+                        )
                     failover_attempts += 1
+
+            if not allows_failover:
+                break
 
         raise RuntimeError(f"All routed attempts failed ({last_status}): {last_error}")
 

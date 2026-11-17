@@ -33,6 +33,7 @@ class RoutingEngine:
         provider: Provider,
         model: str = "auto",
         strategy: Optional[str] = None,
+        exclude_credential_ids: Optional[set] = None,
     ) -> Optional[ProviderCredential]:
         """Applies chosen routing policy (priority, round_robin, weighted, least_recently_used, lowest_cost)
 
@@ -46,6 +47,8 @@ class RoutingEngine:
             .order_by(ProviderCredential.priority.asc())
         )
         candidates = list((await db.execute(stmt)).scalars().all())
+        if exclude_credential_ids:
+            candidates = [c for c in candidates if c.id not in exclude_credential_ids]
 
         eligible = [c for c in candidates if cls._is_eligible(c, now)]
         if not eligible:
