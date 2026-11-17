@@ -1,0 +1,44 @@
+services:
+  token-router:
+    build: .
+    container_name: weirwise-token-router
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ENVIRONMENT=production
+      - HOST=0.0.0.0
+      - PORT=8080
+      - DATABASE_URL=postgresql+asyncpg://token_router:token_router_pass@token-router-db:5432/token_router_db
+      - VAULT_MASTER_KEY=dGhpc2lzYXRlc3RtYXN0ZXJrZXkxMjM0NTY3ODkwMTI=
+      - ADMIN_API_KEY=wtr_admin_secret_key_change_in_production
+    depends_on:
+      token-router-db:
+        condition: service_healthy
+    networks:
+      - router-network
+
+  token-router-db:
+    image: postgres:16-alpine
+    container_name: weirwise-token-router-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=token_router
+      - POSTGRES_PASSWORD=token_router_pass
+      - POSTGRES_DB=token_router_db
+    volumes:
+      - token_router_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U token_router -d token_router_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - router-network
+
+volumes:
+  token_router_data:
+
+networks:
+  router-network:
+    driver: bridge
