@@ -1,18 +1,14 @@
-"""Webhook Ingestion, Verification, Deduplication, and Event Lifecycle Management.
+"""Webhook Ingestion, Verification, Deduplication, and Lifecycle API endpoints."""
 
-Supports full lifecycle: received -> verified -> queued -> processed -> failed -> dead_letter.
-"""
-
-from datetime import UTC, datetime
-from typing import Any, Dict, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+import json
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from token_router.adapters.registry import get_adapter
-from token_router.core.vault import vault
+from token_router.api.dependencies import authenticate_admin, authenticate_consumer
 from token_router.db.session import get_db
-from token_router.models.entities import Provider, ProviderCredential, WebhookEvent
+from token_router.models.entities import Consumer, WebhookEvent
+from token_router.services.webhook_service import WebhookManager
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["Webhooks"])
 
@@ -24,96 +20,24 @@ async def receive_provider_webhook(
     db: AsyncSession = Depends(get_db),
 ):
     """Centralized webhook endpoint receiving events from external services."""
-    try:
-        adapter = get_adapter(provider_name)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Provider '{provider_name}' not supported for webhooks",
-        )
-
     body_bytes = await request.body()
     headers_dict = dict(request.headers)
 
-    # 1. Locate registered provider
-    provider = (await db.execute(select(Provider).where(Provider.name == provider_name.lower()))).scalar_one_or_none()
-    if not provider:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Provider '{provider_name}' not configured in database",
-        )
-
-    # 2. Retrieve credential secret for signature verification
-    cred = (await db.execute(
-        select(ProviderCredential).where(
-            ProviderCredential.provider_id == provider.id,
-            ProviderCredential.is_active.is_(True),
-        )
-    )).scalars().first()
-
-    webhook_secret = ""
-    if cred:
-        webhook_secret = vault.decrypt(cred.encrypted_secret)
-
-    # 3. Provider-specific signature verification
-    is_valid, parsed_event, error_msg = await adapter.verify_webhook(
+    status_code, response_data = await WebhookManager.ingest_webhook(
+        db=db,
+        provider_name=provider_name,
         headers=headers_dict,
         body=body_bytes,
-        secret=webhook_secret,
     )
 
-    if not is_valid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Webhook signature verification failed: {error_msg}",
-        )
+    if status_code >= 400:
+        raise HTTPException(status_code=status_code, detail=response_data.get("error", "Webhook ingestion failed"))
 
-    event_id = parsed_event.get("id") if parsed_event else None
-    event_type = parsed_event.get("type", parsed_event.get("event_type", "webhook_event")) if parsed_event else "webhook_event"
-
-    # 4. Persistent Deduplication and Replay Protection
-    if event_id:
-        existing_event = (await db.execute(
-            select(WebhookEvent).where(
-                WebhookEvent.provider_name == provider_name.lower(),
-                WebhookEvent.external_event_id == str(event_id),
-            )
-        )).scalar_one_or_none()
-
-        if existing_event:
-            # Idempotent response for duplicate event
-            return {
-                "status": "duplicate",
-                "message": "Event already recorded in ledger",
-                "provider": provider_name,
-                "event_id": str(event_id),
-                "lifecycle_state": existing_event.status,
-            }
-
-    # 5. Record verified event in append-only ledger
-    webhook_record = WebhookEvent(
-        provider_name=provider_name.lower(),
-        external_event_id=str(event_id) if event_id else None,
-        event_type=event_type,
-        status="verified",
-        payload=parsed_event or {},
+    return Response(
+        content=json.dumps(response_data),
+        status_code=status_code,
+        media_type="application/json",
     )
-    db.add(webhook_record)
-    await db.commit()
-    await db.refresh(webhook_record)
-
-    # 6. Synchronous processing transition (verified -> processed)
-    webhook_record.status = "processed"
-    webhook_record.processed_at = datetime.now(UTC)
-    await db.commit()
-
-    return {
-        "status": "received",
-        "provider": provider_name,
-        "event_id": webhook_record.external_event_id,
-        "event_type": webhook_record.event_type,
-        "lifecycle_state": webhook_record.status,
-    }
 
 
 @router.get("/events/{event_id}")
@@ -137,7 +61,28 @@ async def get_webhook_event_status(
         "external_event_id": event.external_event_id,
         "event_type": event.event_type,
         "status": event.status,
+        "retry_count": event.retry_count,
         "created_at": event.created_at.isoformat() if event.created_at else None,
         "processed_at": event.processed_at.isoformat() if event.processed_at else None,
         "error_message": event.error_message,
     }
+
+
+@router.post("/events/{event_id}/retry")
+async def retry_dead_letter_webhook(
+    event_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: bool = Depends(authenticate_admin),
+):
+    """Admin endpoint to re-enqueue dead_letter webhook events."""
+    try:
+        event = await WebhookManager.retry_dead_letter_event(db=db, event_id=event_id)
+        return {
+            "id": event.id,
+            "status": event.status,
+            "message": "Event re-enqueued for processing",
+        }
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

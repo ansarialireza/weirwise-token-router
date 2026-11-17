@@ -2,6 +2,8 @@
 
 Shared by REST API, MCP Server, and CLI to prevent code duplication.
 Supports universal execution across AI, Communication, Payments, and Storage.
+Enforces strict consumer/provider authorization, database-backed approvals,
+and distributed idempotency.
 """
 
 import time
@@ -17,7 +19,8 @@ from token_router.core.contracts import ExecutionEnvelope, ServiceCategory
 from token_router.core.config import settings
 from token_router.core.vault import generate_api_key, hash_token, mask_credential, vault
 from token_router.models.entities import Consumer, ConsumerApiKey, Provider, ProviderCredential, UsageRecord
-from token_router.services.approvals import ApprovalManager
+from token_router.services.approvals import PersistentApprovalManager
+from token_router.services.idempotency import IdempotencyManager
 from token_router.services.routing_engine import RoutingEngine
 
 
@@ -60,12 +63,21 @@ class TokenRouterService:
         approval_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Shared execution pipeline for REST, MCP, and CLI with safety semantics."""
-        # 1. Check consumer permissions
+        # 1. Enforce Consumer Active State
+        if not consumer.is_active:
+            raise PermissionError(f"Consumer account '{consumer.name}' is inactive or suspended.")
+
+        # 2. Enforce Consumer Capabilities Permission
         if consumer.allowed_capabilities and "*" not in consumer.allowed_capabilities:
             if capability not in consumer.allowed_capabilities:
                 raise PermissionError(f"Consumer '{consumer.name}' not authorized for capability: {capability}")
 
-        # 2. Check operation safety semantics if registered
+        # 3. Enforce Consumer Providers Permission
+        if provider_name and consumer.allowed_providers and "*" not in consumer.allowed_providers:
+            if provider_name.lower() not in [p.lower() for p in consumer.allowed_providers]:
+                raise PermissionError(f"Consumer '{consumer.name}' not authorized to use provider: {provider_name}")
+
+        # 4. Check operation safety semantics from registry
         op_def = None
         for svc in CapabilityRegistry.list_services():
             for op in svc.operations:
@@ -75,23 +87,69 @@ class TokenRouterService:
             if op_def:
                 break
 
-        # ENFORCE APPROVAL AT CORE EXECUTION BOUNDARY
+        # 5. Persistent Idempotency Check
+        is_new_request = True
+        idemp_rec = None
+        if idempotency_key:
+            is_new_request, idemp_rec = await IdempotencyManager.acquire_or_get(
+                db=db,
+                consumer_id=consumer.id,
+                idempotency_key=idempotency_key,
+                capability=capability,
+                payload=request_payload,
+            )
+            if not is_new_request:
+                # Return cached response for completed idempotent request
+                return {
+                    "request_id": f"req_cached_{uuid.uuid4().hex[:8]}",
+                    "consumer_name": consumer.name,
+                    "category": "cached",
+                    "service": capability,
+                    "operation": capability,
+                    "provider": "idempotency_cache",
+                    "model": model,
+                    "credential_id": "cache",
+                    "status": "success",
+                    "status_code": idemp_rec.status_code or 200,
+                    "latency_ms": 0.0,
+                    "usage": {"cached": True},
+                    "estimated_cost_usd": Decimal("0.0"),
+                    "failover_attempts": 0,
+                    "idempotency_key": idempotency_key,
+                    "data": idemp_rec.response_data,
+                }
+
+        # 6. ENFORCE PERSISTENT APPROVAL AT CORE EXECUTION BOUNDARY
         if op_def and op_def.safety.requires_approval:
-            ApprovalManager.verify_and_consume_approval(approval_id=approval_id, action_type=op_def.id)
+            await PersistentApprovalManager.verify_and_consume(
+                db=db,
+                approval_id=approval_id,
+                action_type=op_def.id,
+                consumer_id=consumer.id,
+                payload=request_payload,
+                provider_name=provider_name,
+            )
 
         allows_failover = True
         if op_def and not op_def.safety.allows_automatic_failover:
             allows_failover = False
             max_failover_attempts = 1  # Strict: payments/financial/sms cannot fail over blindly!
 
-        # 3. Locate eligible enabled providers
+        # 7. Locate eligible enabled providers matching consumer allowed_providers
         provider_stmt = select(Provider).where(Provider.is_enabled.is_(True))
         if provider_name:
             provider_stmt = provider_stmt.where(Provider.name == provider_name.lower())
-        providers = list((await db.execute(provider_stmt)).scalars().all())
+        all_enabled_providers = list((await db.execute(provider_stmt)).scalars().all())
+
+        # Filter by consumer allowed_providers
+        if consumer.allowed_providers and "*" not in consumer.allowed_providers:
+            allowed_set = {p.lower() for p in consumer.allowed_providers}
+            providers = [p for p in all_enabled_providers if p.name.lower() in allowed_set]
+        else:
+            providers = all_enabled_providers
 
         if not providers:
-            raise LookupError(f"No enabled provider found matching '{provider_name or 'any'}'")
+            raise LookupError(f"No authorized enabled provider found matching '{provider_name or 'any'}'")
 
         timeout = timeout_seconds or (op_def.safety.default_timeout_seconds if op_def else settings.DEFAULT_TIMEOUT_SECONDS)
         failover_attempts = 0
@@ -153,6 +211,16 @@ class TokenRouterService:
                         db.add(usage)
                         await db.commit()
 
+                        # Complete idempotency record
+                        if idempotency_key:
+                            await IdempotencyManager.mark_completed(
+                                db=db,
+                                consumer_id=consumer.id,
+                                idempotency_key=idempotency_key,
+                                status_code=status_code,
+                                response_data=response_data,
+                            )
+
                         return {
                             "request_id": f"req_{uuid.uuid4().hex[:12]}",
                             "consumer_name": consumer.name,
@@ -176,7 +244,13 @@ class TokenRouterService:
                     last_status = status_code
                     last_error = response_data
                     if not allows_failover:
-                        # CRITICAL: When failover is forbidden, NEVER try another credential OR provider!
+                        if idempotency_key:
+                            await IdempotencyManager.mark_uncertain(
+                                db=db,
+                                consumer_id=consumer.id,
+                                idempotency_key=idempotency_key,
+                                last_error=str(response_data),
+                            )
                         raise RuntimeError(
                             f"Operation '{capability}' failed on provider '{provider.name}' with status {status_code}: {response_data}. "
                             "Automatic failover is strictly disabled for non-idempotent/financial operations."
@@ -192,7 +266,13 @@ class TokenRouterService:
                     )
                     last_error = {"error": str(e)}
                     if not allows_failover:
-                        # CRITICAL: Prevent cross-provider fallback on timeouts or 5xx
+                        if idempotency_key:
+                            await IdempotencyManager.mark_uncertain(
+                                db=db,
+                                consumer_id=consumer.id,
+                                idempotency_key=idempotency_key,
+                                last_error=str(e),
+                            )
                         raise RuntimeError(
                             f"Operation '{capability}' failed on provider '{provider.name}': {str(e)}. "
                             "Cross-provider failover is strictly prohibited for non-failover-safe operations."

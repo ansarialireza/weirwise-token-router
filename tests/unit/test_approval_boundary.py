@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from token_router.core.vault import vault
 from token_router.models.entities import Consumer, Provider, ProviderCredential
-from token_router.services.approvals import ApprovalManager
+from token_router.services.approvals import PersistentApprovalManager
 from token_router.services.router_service import TokenRouterService
 
 
@@ -53,7 +53,7 @@ async def test_refund_payment_blocked_without_approval(db_session):
             approval_id=None,
         )
 
-    assert "requires explicit human/admin approval" in str(exc_info.value)
+    assert "requires explicit approval" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -91,32 +91,36 @@ async def test_refund_payment_lifecycle_and_replay_prevention(db_session):
     db_session.add(cred)
     await db_session.commit()
 
-    # 1. Create pending approval
-    pending = ApprovalManager.create_pending_operation(
-        risk_level="high",
+    payload = {"payment_intent": "pi_9876", "amount": 2500}
+
+    # 1. Create persistent pending approval bound to payload
+    req = await PersistentApprovalManager.create_request(
+        db=db_session,
+        consumer_id=consumer.id,
         action_type="refund_payment",
         description="Customer refund for order #9876",
         requester=consumer.name,
+        payload=payload,
         target_id="pi_9876",
     )
-    approval_id = pending.operation_id
+    approval_id = req.id
 
-    # 2. Try executing before approval -> fails
+    # 2. Try executing before approval -> fails with PermissionError
     with pytest.raises(PermissionError) as unapproved_err:
         await TokenRouterService.execute_route(
             db=db_session,
             consumer=consumer,
             capability="refund_payment",
             model="default",
-            request_payload={"payment_intent": "pi_9876", "amount": 2500},
+            request_payload=payload,
             approval_id=approval_id,
         )
     assert "has not been approved" in str(unapproved_err.value)
 
-    # 3. Approve operation
-    ApprovalManager.approve_operation(operation_id=approval_id, approver="security_officer_alice")
+    # 3. Approve operation in database
+    await PersistentApprovalManager.approve(db=db_session, approval_id=approval_id, approver="security_officer_alice")
 
-    # 4. Execute with valid approval -> succeeds
+    # 4. Execute with valid approval -> succeeds and consumes atomically
     with patch("token_router.adapters.stripe_adapter.StripeAdapter.execute_operation") as mock_exec:
         mock_exec.return_value = (200, {"id": "re_12345", "status": "succeeded"}, {"transactions": 1})
 
@@ -125,7 +129,7 @@ async def test_refund_payment_lifecycle_and_replay_prevention(db_session):
             consumer=consumer,
             capability="refund_payment",
             model="default",
-            request_payload={"payment_intent": "pi_9876", "amount": 2500},
+            request_payload=payload,
             approval_id=approval_id,
         )
 
@@ -139,7 +143,7 @@ async def test_refund_payment_lifecycle_and_replay_prevention(db_session):
             consumer=consumer,
             capability="refund_payment",
             model="default",
-            request_payload={"payment_intent": "pi_9876", "amount": 2500},
+            request_payload=payload,
             approval_id=approval_id,
         )
     assert "has already been consumed" in str(replay_err.value)

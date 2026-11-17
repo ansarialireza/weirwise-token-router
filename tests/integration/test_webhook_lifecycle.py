@@ -54,17 +54,17 @@ async def test_webhook_lifecycle_and_deduplication(db_session):
                 "Stripe-Signature": f"t={now_ts},v1={v1_sig}",
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
-        assert data["status"] == "received"
+        assert data["status"] == "accepted"
         assert data["event_id"] == "evt_unique_12345"
-        assert data["lifecycle_state"] == "processed"
+        assert data["lifecycle_state"] == "queued"
 
         # 2. Inspect event status endpoint
         status_resp = await client.get("/api/v1/webhooks/events/evt_unique_12345")
         assert status_resp.status_code == 200
         event_info = status_resp.json()
-        assert event_info["status"] == "processed"
+        assert event_info["status"] == "queued"
         assert event_info["event_type"] == "payment_intent.succeeded"
 
         # 3. Post EXACT SAME duplicate event -> returns status 'duplicate'

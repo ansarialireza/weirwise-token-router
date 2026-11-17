@@ -186,3 +186,73 @@ class WebhookEvent(Base):
 
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
     processed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ApprovalRequest(Base):
+    """Persistent, transactional approval requests bound to specific operations and payload hashes."""
+
+    __tablename__ = "approval_requests"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    consumer_id = Column(String(36), ForeignKey("consumers.id", ondelete="CASCADE"), nullable=False, index=True)
+    action_type = Column(String(100), nullable=False, index=True)  # e.g. "refund_payment"
+    provider_name = Column(String(50), nullable=True)  # optional restriction
+    target_id = Column(String(255), nullable=True, index=True)  # transaction ID or resource ID
+    payload_hash = Column(String(64), nullable=False, index=True)  # SHA-256 of canonical JSON payload
+    risk_level = Column(String(20), default="high", nullable=False)
+    description = Column(String(500), nullable=False)
+
+    # Lifecycle state: pending -> approved -> consumed | rejected | expired | cancelled
+    status = Column(String(30), default="pending", nullable=False, index=True)
+    requester = Column(String(100), nullable=False)
+
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    is_approved = Column(Boolean, default=False, nullable=False)
+    approved_by = Column(String(100), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+
+    consumed = Column(Boolean, default=False, nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    consumed_by_request_id = Column(String(64), nullable=True)
+
+    rejection_reason = Column(String(255), nullable=True)
+
+
+class WebhookSecret(Base):
+    """Dedicated encrypted webhook secrets separated from provider API credentials."""
+
+    __tablename__ = "webhook_secrets"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider_name = Column(String(50), nullable=False, index=True)
+    consumer_id = Column(String(36), ForeignKey("consumers.id", ondelete="CASCADE"), nullable=True, index=True)
+    label = Column(String(100), nullable=False)
+    encrypted_secret = Column(Text, nullable=False)
+    secret_hash = Column(String(64), unique=True, nullable=False, index=True)
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    rotated_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class IdempotencyRecord(Base):
+    """Persistent ledger enforcing distributed idempotency and preventing concurrent execution."""
+
+    __tablename__ = "idempotency_records"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    consumer_id = Column(String(36), ForeignKey("consumers.id", ondelete="CASCADE"), nullable=False, index=True)
+    idempotency_key = Column(String(255), nullable=False, index=True)
+    capability = Column(String(100), nullable=False)
+    payload_hash = Column(String(64), nullable=False)
+
+    # Status: pending | completed | failed | uncertain
+    status = Column(String(30), default="pending", nullable=False, index=True)
+    response_data = Column(UniversalJSON, nullable=True)
+    status_code = Column(Integer, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+

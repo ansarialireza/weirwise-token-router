@@ -159,7 +159,7 @@ async def test_ai_chat_legitimate_failover_succeeds(db_session):
         key_prefix="sk-fail",
         encrypted_secret=vault.encrypt("sk-fail12345678"),
         secret_hash="hash_ai_fail",
-        priority=100,
+        priority=10,  # Lower integer = higher priority!
         is_active=True,
         health_status="healthy",
     )
@@ -192,6 +192,7 @@ async def test_ai_chat_legitimate_failover_succeeds(db_session):
             consumer=consumer,
             capability="chat",
             model="gpt-4o",
+            strategy="priority",
             request_payload={"messages": [{"role": "user", "content": "Hi"}]},
             max_failover_attempts=3,
         )

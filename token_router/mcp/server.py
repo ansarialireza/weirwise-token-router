@@ -3,6 +3,7 @@
 Universal Agent Access Layer: Allows AI Agents to discover capabilities,
 inspect health, execute requests across AI, Communication, Payments, and Storage,
 manage providers, and run diagnostics over stdio or HTTP SSE transports.
+Enforces database-backed approvals and execution boundaries.
 """
 
 import asyncio
@@ -11,8 +12,8 @@ import sys
 from typing import Any, Dict, List, Optional
 from token_router.core.capabilities import CapabilityRegistry
 from token_router.db.session import async_session_factory
-from token_router.models.entities import Consumer, Provider
-from token_router.services.approvals import ApprovalManager
+from token_router.models.entities import Consumer
+from token_router.services.approvals import PersistentApprovalManager
 from token_router.services.router_service import TokenRouterService
 
 
@@ -79,12 +80,13 @@ class MCPServer:
                 "description": "Creates an authorization request for sensitive/high-risk actions (e.g. key deletion, budget increase, refund).",
                 "inputSchema": {
                     "type": "object",
-                    "required": ["action_type", "description", "requester"],
+                    "required": ["action_type", "description", "requester", "payload"],
                     "properties": {
                         "action_type": {"type": "string", "description": "Action type e.g. 'delete_credential', 'refund_payment'"},
                         "description": {"type": "string", "description": "Human rationale for action"},
                         "requester": {"type": "string", "description": "Agent or identity requesting change"},
                         "target_id": {"type": "string", "description": "Target entity ID"},
+                        "payload": {"type": "object", "description": "Full operation payload to bind cryptographically to approval"},
                     },
                 },
             },
@@ -106,31 +108,54 @@ class MCPServer:
                 return {"credentials": await TokenRouterService.list_credentials_safe(db=db, provider_id=arguments.get("provider_id"))}
 
             elif tool_name == "request_sensitive_operation":
-                op = ApprovalManager.create_pending_operation(
-                    risk_level="high",
+                # Ensure default agent consumer exists or use id
+                from sqlalchemy import select
+                agent_consumer = (await db.execute(select(Consumer).where(Consumer.name == "mcp_autonomous_agent"))).scalar_one_or_none()
+                if not agent_consumer:
+                    agent_consumer = Consumer(
+                        id="mcp-agent-session",
+                        name="mcp_autonomous_agent",
+                        is_active=True,
+                        allowed_capabilities=["*"],
+                        allowed_providers=["*"],
+                    )
+                    db.add(agent_consumer)
+                    await db.commit()
+
+                req = await PersistentApprovalManager.create_request(
+                    db=db,
+                    consumer_id=agent_consumer.id,
                     action_type=arguments["action_type"],
                     description=arguments["description"],
                     requester=arguments["requester"],
+                    payload=arguments.get("payload", {}),
                     target_id=arguments.get("target_id"),
                 )
                 return {
-                    "operation_id": op.operation_id,
+                    "operation_id": req.id,
+                    "approval_id": req.id,
                     "status": "pending_approval",
-                    "message": "Approval request queued",
+                    "payload_hash": req.payload_hash,
+                    "message": "Persistent approval request queued in database",
                 }
 
             elif tool_name == "execute_request":
-                # Extract consumer identity or construct scoped agent session
-                mock_consumer = Consumer(
-                    id="mcp-agent-session",
-                    name="mcp_autonomous_agent",
-                    is_active=True,
-                    allowed_capabilities=["*"],
-                    allowed_providers=["*"],
-                )
+                from sqlalchemy import select
+                agent_consumer = (await db.execute(select(Consumer).where(Consumer.name == "mcp_autonomous_agent"))).scalar_one_or_none()
+                if not agent_consumer:
+                    agent_consumer = Consumer(
+                        id="mcp-agent-session",
+                        name="mcp_autonomous_agent",
+                        is_active=True,
+                        allowed_capabilities=["*"],
+                        allowed_providers=["*"],
+                    )
+                    db.add(agent_consumer)
+                    await db.commit()
+
                 res = await TokenRouterService.execute_route(
                     db=db,
-                    consumer=mock_consumer,
+                    consumer=agent_consumer,
                     capability=arguments["capability"],
                     model=arguments.get("model", "auto"),
                     request_payload=arguments["request"],
@@ -145,7 +170,6 @@ class MCPServer:
                 raise ValueError(f"Unknown tool: {tool_name}")
 
     async def handle_rpc_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Handles JSON-RPC 2.0 messages."""
         msg_id = message.get("id")
         method = message.get("method")
 
@@ -191,7 +215,6 @@ class MCPServer:
         return None
 
     async def run_stdio(self):
-        """Standard I/O asynchronous event loop for Agent connectivity."""
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
         await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, sys.stdin)
