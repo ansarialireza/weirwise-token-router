@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import patch
 from httpx import AsyncClient, ASGITransport
+from token_router.core.config import settings
 from token_router.main import app
 
 
@@ -8,7 +9,7 @@ from token_router.main import app
 async def test_complete_routing_with_failover_and_audit():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        admin_headers = {"X-Admin-Key": "wtr_admin_secret_key_change_in_production"}
+        admin_headers = {"X-Admin-Key": settings.ADMIN_API_KEY}
 
         # 1. Register Consumer
         c_res = await client.post(
@@ -57,7 +58,6 @@ async def test_complete_routing_with_failover_and_audit():
         )
         assert cred_b_res.status_code == 201
 
-        # 5. Mock OpenAIAdapter.execute_request: Cred A returns 429, Cred B returns 200
         async def mock_execute(secret, capability, model, payload, timeout):
             if "primary-key" in secret:
                 return 429, {"error": {"message": "Rate limit exceeded"}}, {}

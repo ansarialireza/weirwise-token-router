@@ -6,12 +6,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - ENVIRONMENT=production
+      - ENVIRONMENT=${ENVIRONMENT:-production}
       - HOST=0.0.0.0
       - PORT=8080
-      - DATABASE_URL=postgresql+asyncpg://token_router:token_router_pass@token-router-db:5432/token_router_db
-      - VAULT_MASTER_KEY=dGhpc2lzYXRlc3RtYXN0ZXJrZXkxMjM0NTY3ODkwMTI=
-      - ADMIN_API_KEY=wtr_admin_secret_key_change_in_production
+      - DATABASE_URL=${DATABASE_URL}
+      - VAULT_MASTER_KEY=${VAULT_MASTER_KEY}
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - REDIS_URL=${REDIS_URL}
     depends_on:
       token-router-db:
         condition: service_healthy
@@ -23,13 +24,13 @@ services:
     container_name: weirwise-token-router-db
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=token_router
-      - POSTGRES_PASSWORD=token_router_pass
-      - POSTGRES_DB=token_router_db
+      - POSTGRES_USER=${POSTGRES_USER:-token_router}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-token_router_db}
     volumes:
       - token_router_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U token_router -d token_router_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-token_router} -d ${POSTGRES_DB:-token_router_db}"]
       interval: 10s
       timeout: 5s
       retries: 5

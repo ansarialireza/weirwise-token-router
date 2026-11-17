@@ -1,5 +1,6 @@
 import pytest
 from httpx import AsyncClient, ASGITransport
+from token_router.core.config import settings
 from token_router.main import app
 
 
@@ -20,8 +21,7 @@ async def test_health_endpoints():
 async def test_consumer_registration_and_auth():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # Register consumer
-        admin_headers = {"X-Admin-Key": "wtr_admin_secret_key_change_in_production"}
+        admin_headers = {"X-Admin-Key": settings.ADMIN_API_KEY}
         res = await client.post(
             "/api/v1/admin/consumers",
             headers=admin_headers,
@@ -30,7 +30,6 @@ async def test_consumer_registration_and_auth():
         assert res.status_code == 201
         consumer_id = res.json()["id"]
 
-        # Generate key
         key_res = await client.post(
             f"/api/v1/admin/consumers/{consumer_id}/keys",
             headers=admin_headers,
@@ -40,11 +39,9 @@ async def test_consumer_registration_and_auth():
         api_key = key_res.json()["api_key"]
         assert api_key.startswith("wtr_live_")
 
-        # Test unauthorized route attempt without key
         fail_route = await client.post("/api/v1/route", json={"capability": "chat", "request": {}})
         assert fail_route.status_code == 401
 
-        # Test route attempt with valid key (404 because no providers yet)
         consumer_headers = {"X-Consumer-Key": api_key}
         valid_route = await client.post(
             "/api/v1/route",
