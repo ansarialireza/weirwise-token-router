@@ -22,6 +22,8 @@ async def receive_provider_webhook(
     """Centralized webhook endpoint receiving events from external services."""
     body_bytes = await request.body()
     headers_dict = dict(request.headers)
+    # Forward full requested URL so adapter can compute canonical signature
+    headers_dict["x-request-url"] = str(request.url)
 
     status_code, response_data = await WebhookManager.ingest_webhook(
         db=db,

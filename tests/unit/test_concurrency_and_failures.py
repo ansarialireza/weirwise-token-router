@@ -129,3 +129,102 @@ async def test_webhook_processing_retries_and_dead_letter(db_session):
     recovered = await WebhookManager.retry_dead_letter_event(db_session, event.id)
     assert recovered.status == "queued"
     assert recovered.retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_idempotency_race(db_session):
+    """Simulates concurrent in-flight requests with identical idempotency key; exactly one wins and second gets conflict."""
+    from token_router.services.idempotency import IdempotencyConflictError
+    consumer = Consumer(id="c-idemp-race", name="idemp_racer", is_active=True)
+    db_session.add(consumer)
+    await db_session.commit()
+
+    key = "idem_race_key_777"
+    payload = {"order_id": "ord_race_1", "amount": 250}
+
+    # Step 1: First request acquires
+    is_new, rec = await IdempotencyManager.acquire_or_get(
+        db=db_session,
+        consumer_id=consumer.id,
+        idempotency_key=key,
+        capability="create_payment_intent",
+        payload=payload,
+    )
+    assert is_new is True
+    assert rec.status == "in_progress"
+
+    # Step 2: Concurrent second request arrives while first is still in_progress
+    with pytest.raises(IdempotencyConflictError) as exc_info:
+        await IdempotencyManager.acquire_or_get(
+            db=db_session,
+            consumer_id=consumer.id,
+            idempotency_key=key,
+            capability="create_payment_intent",
+            payload=payload,
+        )
+    assert "currently in progress" in str(exc_info.value)
+
+    # Step 3: First request completes
+    await IdempotencyManager.mark_completed(
+        db=db_session,
+        consumer_id=consumer.id,
+        idempotency_key=key,
+        status_code=200,
+        response_data={"payment_id": "pay_999"},
+    )
+
+    # Step 4: Subsequent request returns cached response
+    is_new_third, rec_third = await IdempotencyManager.acquire_or_get(
+        db=db_session,
+        consumer_id=consumer.id,
+        idempotency_key=key,
+        capability="create_payment_intent",
+        payload=payload,
+    )
+    assert is_new_third is False
+    assert rec_third.status == "succeeded"
+    assert rec_third.response_data["payment_id"] == "pay_999"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approval_atomic_consumption(db_session):
+    """Verifies that double-consuming an approved operation fails on the second attempt."""
+    consumer = Consumer(id="c-appr-race", name="appr_racer", is_active=True)
+    db_session.add(consumer)
+    await db_session.commit()
+
+    payload = {"refund_id": "ref_888", "amount": 100}
+    req = await PersistentApprovalManager.create_request(
+        db=db_session,
+        consumer_id=consumer.id,
+        action_type="refund_payment",
+        description="Refund test race",
+        requester=consumer.name,
+        payload=payload,
+    )
+    await PersistentApprovalManager.approve(db_session, req.id, "security_lead")
+
+    # Winner consumes successfully
+    consumed = await PersistentApprovalManager.verify_and_consume(
+        db=db_session,
+        approval_id=req.id,
+        action_type="refund_payment",
+        consumer_id=consumer.id,
+        payload=payload,
+        request_id="req_winner",
+    )
+    assert consumed.consumed is True
+    assert consumed.status == "consumed"
+
+    # Second consumption attempt raises replay rejection
+    with pytest.raises(RuntimeError) as exc_info:
+        await PersistentApprovalManager.verify_and_consume(
+            db=db_session,
+            approval_id=req.id,
+            action_type="refund_payment",
+            consumer_id=consumer.id,
+            payload=payload,
+            request_id="req_loser",
+        )
+    assert "already been consumed" in str(exc_info.value) or "consumed concurrently" in str(exc_info.value)
+

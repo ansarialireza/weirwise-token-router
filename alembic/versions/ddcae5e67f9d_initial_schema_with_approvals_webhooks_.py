@@ -63,7 +63,8 @@ def upgrade() -> None:
     sa.Column('retry_count', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('processed_at', sa.DateTime(timezone=True), nullable=True),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('provider_name', 'external_event_id', name='uq_provider_external_event_id')
     )
     op.create_index(op.f('ix_webhook_events_created_at'), 'webhook_events', ['created_at'], unique=False)
     op.create_index(op.f('ix_webhook_events_event_type'), 'webhook_events', ['event_type'], unique=False)
@@ -77,6 +78,8 @@ def upgrade() -> None:
     sa.Column('provider_name', sa.String(length=50), nullable=True),
     sa.Column('target_id', sa.String(length=255), nullable=True),
     sa.Column('payload_hash', sa.String(length=64), nullable=False),
+    sa.Column('amount', sa.Numeric(precision=12, scale=6), nullable=True),
+    sa.Column('currency', sa.String(length=10), nullable=True),
     sa.Column('risk_level', sa.String(length=20), nullable=False),
     sa.Column('description', sa.String(length=500), nullable=False),
     sa.Column('status', sa.String(length=30), nullable=False),
@@ -127,7 +130,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
     sa.ForeignKeyConstraint(['consumer_id'], ['consumers.id'], ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('consumer_id', 'idempotency_key', name='uq_consumer_idempotency_key')
     )
     op.create_index(op.f('ix_idempotency_records_consumer_id'), 'idempotency_records', ['consumer_id'], unique=False)
     op.create_index(op.f('ix_idempotency_records_idempotency_key'), 'idempotency_records', ['idempotency_key'], unique=False)

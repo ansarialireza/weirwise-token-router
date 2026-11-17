@@ -8,12 +8,12 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 from token_router.core.vault import vault
 from token_router.main import app
-from token_router.models.entities import Provider, ProviderCredential, WebhookEvent
+from token_router.models.entities import Provider, ProviderCredential, WebhookEvent, WebhookSecret
 
 
 @pytest.mark.asyncio
 async def test_webhook_lifecycle_and_deduplication(db_session):
-    # Setup Provider & Webhook Credential
+    # Setup Provider & Dedicated Webhook Secret
     p = Provider(
         id="p-wh-stripe",
         name="stripe",
@@ -23,18 +23,15 @@ async def test_webhook_lifecycle_and_deduplication(db_session):
     db_session.add(p)
 
     wh_secret = "whsec_test_secret_9999"
-    cred = ProviderCredential(
-        id="cred-wh-stripe",
-        provider_id="p-wh-stripe",
-        label="Stripe Secret & Webhook",
-        key_prefix="whsec_",
+    sec = WebhookSecret(
+        id="sec-wh-stripe",
+        provider_name="stripe",
+        label="Stripe Webhook Secret",
         encrypted_secret=vault.encrypt(wh_secret),
         secret_hash="hash_whsec_stripe",
-        priority=100,
         is_active=True,
-        health_status="healthy",
     )
-    db_session.add(cred)
+    db_session.add(sec)
     await db_session.commit()
 
     # Create signed Stripe event

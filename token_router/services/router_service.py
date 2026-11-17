@@ -245,12 +245,22 @@ class TokenRouterService:
                     last_error = response_data
                     if not allows_failover:
                         if idempotency_key:
-                            await IdempotencyManager.mark_uncertain(
-                                db=db,
-                                consumer_id=consumer.id,
-                                idempotency_key=idempotency_key,
-                                last_error=str(response_data),
-                            )
+                            # 4xx client errors can be marked failed; 5xx / timeouts marked uncertain
+                            if status_code < 500:
+                                await IdempotencyManager.mark_failed(
+                                    db=db,
+                                    consumer_id=consumer.id,
+                                    idempotency_key=idempotency_key,
+                                    status_code=status_code,
+                                    error_data=response_data,
+                                )
+                            else:
+                                await IdempotencyManager.mark_uncertain(
+                                    db=db,
+                                    consumer_id=consumer.id,
+                                    idempotency_key=idempotency_key,
+                                    last_error=str(response_data),
+                                )
                         raise RuntimeError(
                             f"Operation '{capability}' failed on provider '{provider.name}' with status {status_code}: {response_data}. "
                             "Automatic failover is strictly disabled for non-idempotent/financial operations."

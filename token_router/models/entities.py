@@ -11,6 +11,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -172,13 +173,16 @@ class WebhookEvent(Base):
     """Persistent ledger for inbound webhook events across providers."""
 
     __tablename__ = "webhook_events"
+    __table_args__ = (
+        UniqueConstraint("provider_name", "external_event_id", name="uq_provider_external_event_id"),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     provider_name = Column(String(50), nullable=False, index=True)
     external_event_id = Column(String(255), nullable=True, index=True)
     event_type = Column(String(100), nullable=False, index=True)
 
-    # Lifecycle state: received -> verified -> queued -> processed -> failed -> dead_letter
+    # Lifecycle state: received -> queued -> processing -> processed | failed | dead_letter | unhandled
     status = Column(String(50), default="received", nullable=False, index=True)
     payload = Column(UniversalJSON, default=dict, nullable=False)
     error_message = Column(Text, nullable=True)
@@ -199,6 +203,8 @@ class ApprovalRequest(Base):
     provider_name = Column(String(50), nullable=True)  # optional restriction
     target_id = Column(String(255), nullable=True, index=True)  # transaction ID or resource ID
     payload_hash = Column(String(64), nullable=False, index=True)  # SHA-256 of canonical JSON payload
+    amount = Column(Numeric(12, 6), nullable=True)  # Optional financial binding
+    currency = Column(String(10), nullable=True)  # Optional currency binding (e.g. USD, EUR)
     risk_level = Column(String(20), default="high", nullable=False)
     description = Column(String(500), nullable=False)
 
@@ -241,6 +247,9 @@ class IdempotencyRecord(Base):
     """Persistent ledger enforcing distributed idempotency and preventing concurrent execution."""
 
     __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("consumer_id", "idempotency_key", name="uq_consumer_idempotency_key"),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     consumer_id = Column(String(36), ForeignKey("consumers.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -248,8 +257,8 @@ class IdempotencyRecord(Base):
     capability = Column(String(100), nullable=False)
     payload_hash = Column(String(64), nullable=False)
 
-    # Status: pending | completed | failed | uncertain
-    status = Column(String(30), default="pending", nullable=False, index=True)
+    # Status state machine: in_progress | succeeded | failed | uncertain | requires_reconciliation
+    status = Column(String(30), default="in_progress", nullable=False, index=True)
     response_data = Column(UniversalJSON, nullable=True)
     status_code = Column(Integer, nullable=True)
 

@@ -7,6 +7,7 @@ Guarantees atomic compare-and-swap consumption and prevents replay.
 import hashlib
 import json
 import uuid
+from decimal import Decimal
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Optional
 from sqlalchemy import select, update
@@ -35,6 +36,8 @@ class PersistentApprovalManager:
         payload: Dict[str, Any],
         provider_name: Optional[str] = None,
         target_id: Optional[str] = None,
+        amount: Optional[Any] = None,
+        currency: Optional[str] = None,
         risk_level: str = "high",
         ttl_minutes: int = 15,
     ) -> ApprovalRequest:
@@ -48,6 +51,8 @@ class PersistentApprovalManager:
             provider_name=provider_name.lower() if provider_name else None,
             target_id=target_id,
             payload_hash=payload_hash,
+            amount=amount,
+            currency=currency.upper() if currency else None,
             risk_level=risk_level,
             description=description,
             requester=requester,
@@ -120,6 +125,8 @@ class PersistentApprovalManager:
         payload: Dict[str, Any],
         provider_name: Optional[str] = None,
         target_id: Optional[str] = None,
+        amount: Optional[Any] = None,
+        currency: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> ApprovalRequest:
         """Atomically validates and consumes an approval record."""
@@ -148,6 +155,13 @@ class PersistentApprovalManager:
         # 4. Verify target binding if restricted
         if req.target_id and target_id and req.target_id != target_id:
             raise PermissionError(f"Approval restricted to target '{req.target_id}', got '{target_id}'.")
+
+        # 4b. Verify financial amount & currency bindings if present
+        if req.amount is not None and amount is not None:
+            if Decimal(str(req.amount)) != Decimal(str(amount)):
+                raise PermissionError(f"Approval amount mismatch! Approved {req.amount}, requested {amount}.")
+        if req.currency and currency and req.currency.upper() != currency.upper():
+            raise PermissionError(f"Approval currency mismatch! Approved {req.currency}, requested {currency}.")
 
         # 5. Verify payload hash match
         incoming_hash = compute_payload_hash(payload)

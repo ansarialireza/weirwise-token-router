@@ -111,8 +111,13 @@ class TwilioAdapter(ProviderAdapter):
 
         try:
             # Twilio canonical signature input: full URL + sorted POST param key-values
-            # When receiving via reverse proxy, X-Forwarded-Url or URL header may be present
-            request_url = headers.get("x-forwarded-url") or headers.get("x-original-url") or "https://token-router/api/v1/webhooks/twilio"
+            # When receiving via reverse proxy or fastapi, X-Forwarded-Url, X-Request-Url, or URL header may be present
+            request_url = (
+                headers.get("x-request-url")
+                or headers.get("x-forwarded-url")
+                or headers.get("x-original-url")
+                or "https://token-router/api/v1/webhooks/twilio"
+            )
 
             # Parse POST parameters if form-encoded
             import urllib.parse
