@@ -1,91 +1,90 @@
-"""Command Line Interface for Weirwise Token Router (wtr)."""
-
-import asyncio
-import json
-import os
-import sys
 import click
+import json
 import httpx
+from typing import Optional
 
 
 @click.group()
-@click.option("--url", envvar="TOKEN_ROUTER_URL", default="http://localhost:8080", help="Token Router API Base URL")
-@click.option("--key", envvar="TOKEN_ROUTER_KEY", default="", help="Consumer or Admin API Key")
+@click.option("--url", default="http://localhost:8000", help="Token Router Base URL")
+@click.option("--api-key", default=None, help="Consumer or Admin API Key")
 @click.pass_context
-def cli(ctx, url, key):
-    """Weirwise Token Router Developer & Agent CLI."""
+def cli(ctx, url: str, api_key: Optional[str]):
+    """wtr - Official CLI for Weirwise Token Router (Universal Service Integration Platform)."""
     ctx.ensure_object(dict)
     ctx.obj["URL"] = url.rstrip("/")
-    ctx.obj["KEY"] = key
+    ctx.obj["API_KEY"] = api_key
 
 
 @cli.command()
 @click.pass_context
 def status(ctx):
-    """Check Token Router health and readiness."""
-    url = ctx.obj["URL"]
+    """Check Token Router platform health and reachability."""
+    url = f"{ctx.obj['URL']}/health"
     try:
-        resp = httpx.get(f"{url}/health/ready", timeout=5.0)
-        click.echo(json.dumps(resp.json(), indent=2))
+        resp = httpx.get(url, timeout=5.0)
+        click.echo(f"[{resp.status_code}] {resp.text}")
     except Exception as e:
-        click.echo(f"Error connecting to Token Router at {url}: {e}", err=True)
-        sys.exit(1)
+        click.echo(f"Error connecting to {url}: {e}", err=True)
 
 
 @cli.command()
+@click.option("--category", default=None, help="Optional category filter (ai, communication, payments, storage, data)")
 @click.pass_context
-def discover(ctx):
-    """Discover available AI providers, models, and capabilities."""
-    url = ctx.obj["URL"]
-    key = ctx.obj["KEY"]
-    headers = {"X-Consumer-Key": key} if key else {}
+def discover(ctx, category: Optional[str]):
+    """Discover all supported service categories, providers, operations, and models."""
+    url = f"{ctx.obj['URL']}/api/v1/discover"
+    params = {"category": category} if category else {}
+    headers = {"Authorization": f"Bearer {ctx.obj['API_KEY']}"} if ctx.obj["API_KEY"] else {}
     try:
-        resp = httpx.get(f"{url}/api/v1/discover", headers=headers, timeout=10.0)
+        resp = httpx.get(url, params=params, headers=headers, timeout=10.0)
         click.echo(json.dumps(resp.json(), indent=2))
     except Exception as e:
-        click.echo(f"Discovery failed: {e}", err=True)
-        sys.exit(1)
+        click.echo(f"Discovery error: {e}", err=True)
 
 
 @cli.command()
 @click.pass_context
 def diagnostics(ctx):
-    """Run infrastructure and database self-diagnostics."""
-    url = ctx.obj["URL"]
+    """Run automated system self-diagnostics across database, vault, and categories."""
+    url = f"{ctx.obj['URL']}/api/v1/diagnostics"
     try:
-        resp = httpx.get(f"{url}/api/v1/diagnostics", timeout=10.0)
+        resp = httpx.get(url, timeout=10.0)
         click.echo(json.dumps(resp.json(), indent=2))
     except Exception as e:
         click.echo(f"Diagnostics error: {e}", err=True)
-        sys.exit(1)
 
 
 @cli.command()
 @click.argument("message")
 @click.option("--provider", default=None, help="Provider e.g. openai, anthropic")
-@click.option("--model", default="auto", help="Model name or 'auto'")
+@click.option("--model", default="auto", help="Model name or auto")
 @click.pass_context
-def chat(ctx, message, provider, model):
-    """Execute a test routed chat query."""
-    url = ctx.obj["URL"]
-    key = ctx.obj["KEY"]
-    if not key:
-        click.echo("Error: A valid --key (or TOKEN_ROUTER_KEY env) is required.", err=True)
-        sys.exit(1)
+def chat(ctx, message: str, provider: Optional[str], model: str):
+    """Send an interactive chat completion request."""
+    if not ctx.obj["API_KEY"]:
+        click.echo("Error: --api-key is required to execute requests.", err=True)
+        return
 
+    url = f"{ctx.obj['URL']}/api/v1/route"
+    headers = {
+        "Authorization": f"Bearer {ctx.obj['API_KEY']}",
+        "Content-Type": "application/json",
+    }
     payload = {
-        "provider": provider,
         "capability": "chat",
+        "provider": provider,
         "model": model,
-        "request": {"messages": [{"role": "user", "content": message}]},
+        "request": {
+            "messages": [{"role": "user", "content": message}]
+        },
     }
     try:
-        resp = httpx.post(f"{url}/api/v1/route", headers={"X-Consumer-Key": key}, json=payload, timeout=30.0)
+        resp = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+        click.echo(f"Response [{resp.status_code}]:")
         click.echo(json.dumps(resp.json(), indent=2))
     except Exception as e:
-        click.echo(f"Chat route failed: {e}", err=True)
-        sys.exit(1)
+        click.echo(f"Routing request error: {e}", err=True)
 
 
 if __name__ == "__main__":
-    cli(obj={})
+    cli()

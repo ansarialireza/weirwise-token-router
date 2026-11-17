@@ -1,7 +1,7 @@
 import time
 from decimal import Decimal
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,17 +22,26 @@ router = APIRouter(prefix="/api/v1", tags=["Routing & Capabilities"])
 
 @router.get("/discover")
 async def discover_system_capabilities(
+    category: Optional[str] = Query(None, description="Filter by category (ai, communication, payments, storage, data)"),
     consumer: Optional[Consumer] = Depends(authenticate_consumer),
     db: AsyncSession = Depends(get_db),
 ):
-    """Dynamic discovery endpoint for Agents to inspect available providers, services, models, and health."""
-    return await TokenRouterService.discover_capabilities(db=db, consumer=consumer)
+    """Dynamic discovery endpoint for Agents to inspect available service categories, providers, operations, and health."""
+    return await TokenRouterService.discover_capabilities(db=db, consumer=consumer, category_filter=category)
+
+
+@router.get("/categories")
+async def list_service_categories():
+    """List universal service categories (AI, Communication, Payments, Storage, Data Search, Productivity, Social)."""
+    return CapabilityRegistry.list_categories()
 
 
 @router.get("/services")
-async def list_supported_services():
-    """List distinct AI services (chat, embeddings, text-to-speech, speech-to-text, email)."""
-    return [s.model_dump() for s in CapabilityRegistry.list_services()]
+async def list_supported_services(
+    category: Optional[str] = Query(None, description="Optional category filter"),
+):
+    """List distinct universal services and their operations."""
+    return [s.model_dump() for s in CapabilityRegistry.list_services(category_filter=category)]
 
 
 @router.get("/diagnostics")
@@ -49,7 +58,7 @@ async def route_request(
     consumer: Consumer = Depends(authenticate_consumer),
     db: AsyncSession = Depends(get_db),
 ) -> RouteResponse:
-    """Executes an intelligent, credential-routed request with bounded failover."""
+    """Executes an intelligent, credential-routed request across any universal service category."""
     try:
         result = await TokenRouterService.execute_route(
             db=db,
@@ -61,59 +70,14 @@ async def route_request(
             strategy=payload.strategy,
             max_failover_attempts=payload.max_failover_attempts,
             timeout_seconds=payload.timeout_seconds,
+            idempotency_key=payload.idempotency_key,
         )
         return RouteResponse(**result)
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-
-@router.post("/route/stream")
-async def route_stream(
-    payload: RouteRequest,
-    consumer: Consumer = Depends(authenticate_consumer),
-    db: AsyncSession = Depends(get_db),
-):
-    """Executes an intelligent, credential-routed streaming request."""
-    if payload.capability not in consumer.allowed_capabilities:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Consumer '{consumer.name}' is not authorized for capability: {payload.capability}",
-        )
-
-    provider_stmt = select(Provider).where(Provider.is_enabled.is_(True))
-    if payload.provider:
-        provider_stmt = provider_stmt.where(Provider.name == payload.provider.lower())
-    provider = (await db.execute(provider_stmt)).scalars().first()
-
-    if not provider:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No enabled provider found matching '{payload.provider or 'any'}'",
-        )
-
-    cred = await RoutingEngine.select_credential(db=db, provider=provider, model=payload.model)
-    if not cred:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No healthy active credentials available for this provider.",
-        )
-
-    adapter = get_adapter(provider.name)
-    secret = vault.decrypt(cred.encrypted_secret)
-    timeout = payload.timeout_seconds or settings.DEFAULT_TIMEOUT_SECONDS
-
-    async def stream_generator():
-        async for chunk in adapter.execute_stream(
-            secret=secret,
-            capability=payload.capability,
-            model=payload.model,
-            payload=payload.request,
-            timeout=timeout,
-        ):
-            yield f"{chunk}\n"
-
-    return StreamingResponse(stream_generator(), media_type="text/event-stream")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Routing failure: {str(e)}")

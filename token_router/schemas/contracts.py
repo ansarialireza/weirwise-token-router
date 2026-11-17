@@ -8,7 +8,7 @@ from decimal import Decimal
 class ConsumerCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     description: Optional[str] = None
-    allowed_capabilities: List[str] = Field(default_factory=lambda: ["chat", "embeddings", "speech-to-text", "email"])
+    allowed_capabilities: List[str] = Field(default_factory=lambda: ["*"])
     allowed_providers: List[str] = Field(default_factory=lambda: ["*"])
     monthly_budget_usd: Decimal = Field(default=Decimal("1000.0"))
 
@@ -42,7 +42,7 @@ class ConsumerKeyResponse(BaseModel):
 
 # --- Provider Schemas ---
 class ProviderCreate(BaseModel):
-    name: str = Field(..., min_length=2, max_length=50)  # openai, anthropic, etc.
+    name: str = Field(..., min_length=2, max_length=50)  # openai, stripe, twilio, s3_compatible
     display_name: str = Field(..., min_length=2, max_length=100)
     description: Optional[str] = None
     capabilities: List[str] = Field(default_factory=lambda: ["chat"])
@@ -66,7 +66,7 @@ class ProviderResponse(BaseModel):
 # --- Credential Schemas ---
 class CredentialCreate(BaseModel):
     label: str = Field(..., min_length=2, max_length=100)
-    secret: str = Field(..., min_length=8)  # Raw secret, will be encrypted in vault immediately
+    secret: str = Field(..., min_length=4)  # Raw secret, will be encrypted in vault immediately
     priority: int = 10
     routing_weight: int = 1
     models_allowed: List[str] = Field(default_factory=lambda: ["*"])
@@ -102,23 +102,30 @@ class CredentialResponse(BaseModel):
 
 # --- Route Schemas ---
 class RouteRequest(BaseModel):
-    provider: Optional[str] = None  # Optional: "openai", "anthropic", or None for auto
-    capability: str = "chat"  # "chat" | "embeddings" | "speech-to-text" | "email"
+    provider: Optional[str] = None  # Specific provider e.g. "openai", "stripe" or None for auto
+    capability: str = "chat"  # "chat", "create_payment_intent", "send_email", "send_sms", "put_object"
     model: str = "auto"
-    request: Dict[str, Any]  # Provider-specific payload (messages, input, text, etc.)
+    request: Dict[str, Any]  # Provider-specific payload (messages, amount, to, key, etc.)
     timeout_seconds: Optional[float] = None
     max_failover_attempts: int = 3
     strategy: Optional[str] = None  # Override strategy (priority, round_robin, weighted, etc.)
+    idempotency_key: Optional[str] = None
 
 
 class RouteResponse(BaseModel):
+    request_id: Optional[str] = None
+    consumer_name: Optional[str] = None
+    category: Optional[str] = None
+    service: Optional[str] = None
+    operation: Optional[str] = None
     provider: str
     model: str
     credential_id: str
     status: str
     status_code: int
     latency_ms: float
-    usage: Dict[str, int] = Field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+    usage: Dict[str, Any] = Field(default_factory=dict)
     estimated_cost_usd: Decimal = Decimal("0.0")
     failover_attempts: int = 0
+    idempotency_key: Optional[str] = None
     data: Any  # Decoded response body from provider
