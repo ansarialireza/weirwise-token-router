@@ -20,7 +20,13 @@ from token_router.core.config import settings
 from token_router.core.vault import generate_api_key, hash_token, mask_credential, vault
 from token_router.models.entities import Consumer, ConsumerApiKey, Provider, ProviderCredential, UsageRecord
 from token_router.services.approvals import PersistentApprovalManager
-from token_router.services.idempotency import IdempotencyManager
+from token_router.services.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyExecutionFailedError,
+    IdempotencyManager,
+    IdempotencyPayloadMismatchError,
+    IdempotencyUncertainError,
+)
 from token_router.services.routing_engine import RoutingEngine
 
 
@@ -99,7 +105,11 @@ class TokenRouterService:
                 payload=request_payload,
             )
             if not is_new_request:
-                # Return cached response for completed idempotent request
+                # ONLY status == 'succeeded' or 'completed' is allowed here (other states raise specific exceptions in acquire_or_get)
+                if idemp_rec.status not in ("succeeded", "completed"):
+                    raise RuntimeError(
+                        f"Non-successful idempotency status '{idemp_rec.status}' for key '{idempotency_key}'. Cached success response prohibited."
+                    )
                 return {
                     "request_id": f"req_cached_{uuid.uuid4().hex[:8]}",
                     "consumer_name": consumer.name,
@@ -121,6 +131,18 @@ class TokenRouterService:
 
         # 6. ENFORCE PERSISTENT APPROVAL AT CORE EXECUTION BOUNDARY
         if op_def and op_def.safety.requires_approval:
+            # Extract target_id, amount, currency from request_payload if present
+            target_id = (
+                request_payload.get("target_id")
+                or request_payload.get("transaction_id")
+                or request_payload.get("payment_intent")
+                or request_payload.get("payment_intent_id")
+                or request_payload.get("charge_id")
+                or request_payload.get("id")
+            )
+            amount = request_payload.get("amount")
+            currency = request_payload.get("currency")
+
             await PersistentApprovalManager.verify_and_consume(
                 db=db,
                 approval_id=approval_id,
@@ -128,6 +150,9 @@ class TokenRouterService:
                 consumer_id=consumer.id,
                 payload=request_payload,
                 provider_name=provider_name,
+                target_id=target_id,
+                amount=amount,
+                currency=currency,
             )
 
         allows_failover = True

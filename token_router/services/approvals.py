@@ -1,15 +1,15 @@
 """Persistent Transactional Approval Manager with Cryptographic Payload Binding.
 
 Replaces in-memory storage with database-backed ApprovalRequest records.
-Guarantees atomic compare-and-swap consumption and prevents replay.
+Guarantees atomic compare-and-swap consumption, exact field binding, and prevents replay.
 """
 
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 import hashlib
 import json
-import uuid
-from decimal import Decimal
-from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Optional
+import uuid
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,7 @@ def compute_payload_hash(payload: Any) -> str:
 
 
 class PersistentApprovalManager:
-    """Database-backed approval management with row-level atomic consumption."""
+    """Database-backed approval management with row-level atomic consumption and exact field validation."""
 
     @classmethod
     async def create_request(
@@ -44,6 +44,9 @@ class PersistentApprovalManager:
         now = datetime.now(UTC)
         payload_hash = compute_payload_hash(payload)
 
+        # Normalize amount if provided
+        dec_amount = Decimal(str(amount)) if amount is not None else None
+
         req = ApprovalRequest(
             id=str(uuid.uuid4()),
             consumer_id=consumer_id,
@@ -51,7 +54,7 @@ class PersistentApprovalManager:
             provider_name=provider_name.lower() if provider_name else None,
             target_id=target_id,
             payload_hash=payload_hash,
-            amount=amount,
+            amount=dec_amount,
             currency=currency.upper() if currency else None,
             risk_level=risk_level,
             description=description,
@@ -129,7 +132,13 @@ class PersistentApprovalManager:
         currency: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> ApprovalRequest:
-        """Atomically validates and consumes an approval record."""
+        """Atomically validates and consumes an approval record with strict exact-field matching.
+
+        MANDATORY VALIDATION:
+        If an approval contains a bound value (provider_name, target_id, amount, currency),
+        the consuming request MUST provide the corresponding value and match it exactly.
+        Missing bound values are strictly rejected.
+        """
         if not approval_id:
             raise PermissionError(
                 f"Action '{action_type}' requires explicit approval. "
@@ -148,27 +157,40 @@ class PersistentApprovalManager:
         if req.action_type != action_type:
             raise ValueError(f"Approval ID was issued for '{req.action_type}', not '{action_type}'.")
 
-        # 3. Verify provider binding if restricted
-        if req.provider_name and provider_name and req.provider_name != provider_name.lower():
-            raise PermissionError(f"Approval restricted to provider '{req.provider_name}', got '{provider_name}'.")
+        # 3. Verify provider binding: If approval bound to provider, consumer MUST supply it and match
+        if req.provider_name:
+            if not provider_name:
+                raise PermissionError(f"Approval is bound to provider '{req.provider_name}', but consuming request omitted provider.")
+            if req.provider_name.lower() != provider_name.lower():
+                raise PermissionError(f"Approval restricted to provider '{req.provider_name}', got '{provider_name}'.")
 
-        # 4. Verify target binding if restricted
-        if req.target_id and target_id and req.target_id != target_id:
-            raise PermissionError(f"Approval restricted to target '{req.target_id}', got '{target_id}'.")
+        # 4. Verify target binding: If approval bound to target, consumer MUST supply it and match
+        if req.target_id:
+            if not target_id:
+                raise PermissionError(f"Approval is bound to target_id '{req.target_id}', but consuming request omitted target_id.")
+            if req.target_id != target_id:
+                raise PermissionError(f"Approval restricted to target '{req.target_id}', got '{target_id}'.")
 
-        # 4b. Verify financial amount & currency bindings if present
-        if req.amount is not None and amount is not None:
+        # 5. Verify financial amount binding: If approval bound to amount, consumer MUST supply it and match
+        if req.amount is not None:
+            if amount is None:
+                raise PermissionError(f"Approval is bound to amount '{req.amount}', but consuming request omitted amount.")
             if Decimal(str(req.amount)) != Decimal(str(amount)):
                 raise PermissionError(f"Approval amount mismatch! Approved {req.amount}, requested {amount}.")
-        if req.currency and currency and req.currency.upper() != currency.upper():
-            raise PermissionError(f"Approval currency mismatch! Approved {req.currency}, requested {currency}.")
 
-        # 5. Verify payload hash match
+        # 6. Verify currency binding: If approval bound to currency, consumer MUST supply it and match
+        if req.currency:
+            if not currency:
+                raise PermissionError(f"Approval is bound to currency '{req.currency}', but consuming request omitted currency.")
+            if req.currency.upper() != currency.upper():
+                raise PermissionError(f"Approval currency mismatch! Approved {req.currency}, requested {currency}.")
+
+        # 7. Verify payload hash match
         incoming_hash = compute_payload_hash(payload)
         if req.payload_hash != incoming_hash:
             raise PermissionError("Approval payload hash mismatch! Operation parameters differ from approved request.")
 
-        # 6. Verify expiration
+        # 8. Verify expiration
         now = datetime.now(UTC)
         exp = req.expires_at.replace(tzinfo=UTC) if req.expires_at.tzinfo is None else req.expires_at
         if exp < now:
@@ -176,13 +198,13 @@ class PersistentApprovalManager:
             await db.commit()
             raise TimeoutError("Approval request has expired.")
 
-        # 7. Verify approval state
+        # 9. Verify approval state
         if not req.is_approved or req.status != "approved":
             if req.consumed or req.status == "consumed":
                 raise RuntimeError(f"Approval ID '{approval_id}' has already been consumed. Replay rejected.")
             raise PermissionError(f"Operation '{approval_id}' has not been approved (status: {req.status}).")
 
-        # 8. ATOMIC CONSUMPTION: conditional update with state predicate (WHERE status='approved' AND consumed=False)
+        # 10. ATOMIC CONSUMPTION: conditional update with state predicate (WHERE status='approved' AND consumed=False)
         consume_stmt = (
             update(ApprovalRequest)
             .where(

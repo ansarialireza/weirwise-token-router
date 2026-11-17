@@ -66,7 +66,11 @@ async def run_async_migrations() -> None:
     """
 
     configuration = config.get_section(config.config_ini_section, {})
-    if "sqlalchemy.url" not in configuration or not configuration["sqlalchemy.url"]:
+    # Use explicitly passed alembic_cfg.set_main_option("sqlalchemy.url") if provided
+    override_url = config.get_main_option("sqlalchemy.url")
+    if override_url:
+        configuration["sqlalchemy.url"] = override_url
+    elif "sqlalchemy.url" not in configuration or not configuration["sqlalchemy.url"]:
         configuration["sqlalchemy.url"] = settings.DATABASE_URL
     else:
         configuration["sqlalchemy.url"] = settings.DATABASE_URL

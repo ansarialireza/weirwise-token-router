@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
     CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 60
 
+    # Trusted Reverse Proxy configuration for public webhook URL determination
+    # Only if client IP is in TRUSTED_PROXIES will X-Forwarded-Proto / X-Forwarded-Host be honored.
+    TRUSTED_PROXIES: List[str] = ["127.0.0.1", "::1"]
+    PUBLIC_WEBHOOK_URL_BASE: Optional[str] = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

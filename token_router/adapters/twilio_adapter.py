@@ -1,12 +1,19 @@
-"""Twilio SMS and Communications Provider Adapter.
+"""Official Twilio Webhook Signature Verification.
 
-Handles outbound SMS dispatch and Twilio signature verification.
+Follows official Twilio specification:
+- Exact public URL including scheme, host, port, path, and query parameters.
+- Sorted POST parameters appended as key + value without separators.
+- HMAC-SHA1 with Twilio Auth Token.
+- Base64 encoding of HMAC digest compared in constant-time.
+- ZERO raw-body fallback. ZERO fabricated fallback URLs.
+- Strict trusted reverse proxy validation.
 """
 
 import base64
 import hashlib
 import hmac
-from typing import Any, Dict, Tuple, Optional
+import urllib.parse
+from typing import Any, Dict, Optional, Tuple
 import httpx
 
 from token_router.adapters.base import ProviderAdapter
@@ -66,30 +73,58 @@ class TwilioAdapter(ProviderAdapter):
     ) -> Tuple[int, Dict[str, Any], Dict[str, Any]]:
         account_sid, auth_token = self._parse_secret(secret)
         if not account_sid or not auth_token:
-            return 400, {"error": "Invalid Twilio credentials format (must be SID:TOKEN)"}, {}
+            return 400, {"error": "Twilio credential must be formatted as ACCOUNT_SID:AUTH_TOKEN"}, {}
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                if operation in ("send_sms", "sms"):
-                    form_data = {
-                        "To": payload.get("to"),
-                        "From": payload.get("from"),
-                        "Body": payload.get("body", payload.get("text", "")),
-                    }
-                    if "media_url" in payload:
-                        form_data["MediaUrl"] = payload["media_url"]
+        if operation == "send_sms":
+            to = payload.get("to")
+            from_num = payload.get("from")
+            body = payload.get("body")
+            if not to or not body:
+                return 400, {"error": "Twilio SMS requires 'to' and 'body' fields"}, {}
 
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                data = {"To": to, "Body": body}
+                if from_num:
+                    data["From"] = from_num
+
+                try:
                     resp = await client.post(
                         f"{self.base_url}/Accounts/{account_sid}/Messages.json",
-                        data=form_data,
                         auth=(account_sid, auth_token),
+                        data=data,
                     )
-                    data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
-                    return resp.status_code, data, {"segments": 1}
-                else:
-                    return 400, {"error": f"Unsupported Twilio operation: {operation}"}, {}
-            except Exception as e:
-                return 502, {"error": f"Twilio gateway error: {str(e)}"}, {}
+                    resp_json = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
+                    return resp.status_code, resp_json, {"messages": 1, "segments": 1}
+                except httpx.TimeoutException:
+                    return 504, {"error": f"Twilio gateway timeout dispatching SMS to {to}"}, {}
+                except Exception as e:
+                    return 502, {"error": f"Twilio communication failure: {str(e)}"}, {}
+
+        return 400, {"error": f"Unsupported Twilio operation: {operation}"}, {}
+
+    @classmethod
+    def compute_twilio_signature(cls, signing_key: str, public_url: str, post_params: Dict[str, Any]) -> str:
+        """Computes official Twilio HMAC-SHA1 signature.
+        
+        Algorithm:
+        1. Start with full canonical URL (scheme, host, path, query).
+        2. Sort POST parameter keys lexicographically.
+        3. For each key, append key name followed by value (for multi-values, append each value).
+        4. Sign with HMAC-SHA1 using Twilio auth token.
+        5. Base64 encode the digest.
+        """
+        data_to_sign = public_url
+        for key in sorted(post_params.keys()):
+            val = post_params[key]
+            if isinstance(val, list):
+                # If multiple values for same key, sort values as per Twilio spec
+                for item in sorted(str(v) for v in val):
+                    data_to_sign += f"{key}{item}"
+            else:
+                data_to_sign += f"{key}{val}"
+
+        mac = hmac.new(signing_key.encode("utf-8"), data_to_sign.encode("utf-8"), hashlib.sha1)
+        return base64.b64encode(mac.digest()).decode("utf-8")
 
     async def verify_webhook(
         self,
@@ -97,63 +132,60 @@ class TwilioAdapter(ProviderAdapter):
         body: bytes,
         secret: str,
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-        """Validate Twilio X-Twilio-Signature according to Twilio standard specification:
-
-        HMAC-SHA1 of full URL + sorted POST parameter key-values, compared in constant time.
+        """Validate Twilio X-Twilio-Signature according to official Twilio specification.
+        
+        FAIL-CLOSED REQUIREMENTS:
+        - Signature header MUST be present.
+        - Canonical URL MUST be provided via headers['x-request-url'] or headers['x-canonical-url'].
+        - NO fabricated fallback URLs.
+        - NO raw-body fallback.
+        - Constant-time comparison using hmac.compare_digest.
         """
         signature = headers.get("x-twilio-signature") or headers.get("X-Twilio-Signature")
         if not signature:
             return False, None, "Missing X-Twilio-Signature header"
 
-        # Obtain auth token from secret (ACCOUNT_SID:AUTH_TOKEN or raw token)
+        # The exact public URL must be passed by the application/proxy boundary
+        request_url = headers.get("x-canonical-url") or headers.get("x-request-url")
+        if not request_url:
+            return False, None, "Fail-closed: Missing canonical public URL for Twilio signature verification."
+
         _, auth_token = self._parse_secret(secret)
         signing_key = auth_token or secret
+        if not signing_key:
+            return False, None, "Twilio signing secret is missing or empty."
 
-        try:
-            # Twilio canonical signature input: full URL + sorted POST param key-values
-            # When receiving via reverse proxy or fastapi, X-Forwarded-Url, X-Request-Url, or URL header may be present
-            request_url = (
-                headers.get("x-request-url")
-                or headers.get("x-forwarded-url")
-                or headers.get("x-original-url")
-                or "https://token-router/api/v1/webhooks/twilio"
-            )
-
-            # Parse POST parameters if form-encoded
-            import urllib.parse
-            data_to_sign = request_url
+        # Parse form-encoded parameters if present
+        post_params: Dict[str, Any] = {}
+        if body:
             try:
-                parsed_params = urllib.parse.parse_qs(body.decode("utf-8"), keep_blank_values=True)
-                for key in sorted(parsed_params.keys()):
-                    # parse_qs returns list of values; Twilio takes the first/single value
-                    val = parsed_params[key][0] if parsed_params[key] else ""
-                    data_to_sign += f"{key}{val}"
-            except Exception:
-                pass
+                # Twilio sends application/x-www-form-urlencoded
+                raw_parsed = urllib.parse.parse_qs(body.decode("utf-8"), keep_blank_values=True)
+                for k, v in raw_parsed.items():
+                    # If single value, keep as scalar; if multiple, list
+                    post_params[k] = v if len(v) > 1 else v[0]
+            except Exception as e:
+                return False, None, f"Failed to parse form parameters from webhook body: {str(e)}"
 
-            mac = hmac.new(signing_key.encode("utf-8"), data_to_sign.encode("utf-8"), hashlib.sha1)
-            expected_sig = base64.b64encode(mac.digest()).decode("utf-8")
+        # Compute official expected signature
+        expected_sig = self.compute_twilio_signature(
+            signing_key=signing_key,
+            public_url=request_url,
+            post_params=post_params,
+        )
 
-            if not hmac.compare_digest(expected_sig, signature):
-                # Also allow raw-body fallback check if parameters parsing differs
-                mac_raw = hmac.new(signing_key.encode("utf-8"), body, hashlib.sha1)
-                expected_raw = base64.b64encode(mac_raw.digest()).decode("utf-8")
-                if not hmac.compare_digest(expected_raw, signature):
-                    return False, None, "Invalid Twilio signature"
+        # Constant-time comparison (NO raw body fallback!)
+        if not hmac.compare_digest(expected_sig, signature):
+            return False, None, "Twilio signature mismatch: Verification failed."
 
-            # Parse message SID and body
-            event_id = headers.get("message-sid") or headers.get("MessageSid")
-            if not event_id:
-                try:
-                    p = urllib.parse.parse_qs(body.decode("utf-8"))
-                    event_id = p.get("MessageSid", [None])[0] or p.get("SmsSid", [None])[0]
-                except Exception:
-                    pass
+        # Extract message ID / SID
+        message_sid = post_params.get("MessageSid") or post_params.get("SmsSid")
+        if isinstance(message_sid, list):
+            message_sid = message_sid[0] if message_sid else None
 
-            return True, {
-                "id": event_id,
-                "type": "sms.delivered",
-                "provider": "twilio",
-            }, None
-        except Exception as e:
-            return False, None, f"Twilio signature verification error: {str(e)}"
+        return True, {
+            "id": message_sid,
+            "type": "sms.delivered",
+            "provider": "twilio",
+            "params": post_params,
+        }, None

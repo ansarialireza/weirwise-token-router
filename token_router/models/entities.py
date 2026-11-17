@@ -182,11 +182,22 @@ class WebhookEvent(Base):
     external_event_id = Column(String(255), nullable=True, index=True)
     event_type = Column(String(100), nullable=False, index=True)
 
-    # Lifecycle state: received -> queued -> processing -> processed | failed | dead_letter | unhandled
+    # Lifecycle state: received -> queued -> processing -> processed | failed | dead_letter | unsupported
     status = Column(String(50), default="received", nullable=False, index=True)
     payload = Column(UniversalJSON, default=dict, nullable=False)
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, default=0, nullable=False)
+
+    # Atomic leasing & worker tracking
+    claim_token = Column(String(64), nullable=True, index=True)
+    claimed_by = Column(String(100), nullable=True)
+    processing_started_at = Column(DateTime(timezone=True), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    # Retry scheduling & diagnostics
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    last_error_category = Column(String(50), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
     processed_at = Column(DateTime(timezone=True), nullable=True)
@@ -261,6 +272,8 @@ class IdempotencyRecord(Base):
     status = Column(String(30), default="in_progress", nullable=False, index=True)
     response_data = Column(UniversalJSON, nullable=True)
     status_code = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    recovery_metadata = Column(UniversalJSON, default=dict, nullable=False)
 
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)

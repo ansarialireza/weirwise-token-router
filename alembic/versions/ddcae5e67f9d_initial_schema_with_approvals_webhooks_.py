@@ -61,11 +61,21 @@ def upgrade() -> None:
     sa.Column('payload', postgresql.JSONB(astext_type=Text()).with_variant(sa.JSON(), 'sqlite'), nullable=False),
     sa.Column('error_message', sa.Text(), nullable=True),
     sa.Column('retry_count', sa.Integer(), nullable=False),
+    sa.Column('claim_token', sa.String(length=64), nullable=True),
+    sa.Column('claimed_by', sa.String(length=100), nullable=True),
+    sa.Column('processing_started_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('lease_expires_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('next_attempt_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('last_attempt_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('last_error_category', sa.String(length=50), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('processed_at', sa.DateTime(timezone=True), nullable=True),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('provider_name', 'external_event_id', name='uq_provider_external_event_id')
     )
+    op.create_index(op.f('ix_webhook_events_claim_token'), 'webhook_events', ['claim_token'], unique=False)
+    op.create_index(op.f('ix_webhook_events_lease_expires_at'), 'webhook_events', ['lease_expires_at'], unique=False)
+    op.create_index(op.f('ix_webhook_events_next_attempt_at'), 'webhook_events', ['next_attempt_at'], unique=False)
     op.create_index(op.f('ix_webhook_events_created_at'), 'webhook_events', ['created_at'], unique=False)
     op.create_index(op.f('ix_webhook_events_event_type'), 'webhook_events', ['event_type'], unique=False)
     op.create_index(op.f('ix_webhook_events_external_event_id'), 'webhook_events', ['external_event_id'], unique=False)
@@ -127,6 +137,8 @@ def upgrade() -> None:
     sa.Column('status', sa.String(length=30), nullable=False),
     sa.Column('response_data', postgresql.JSONB(astext_type=Text()).with_variant(sa.JSON(), 'sqlite'), nullable=True),
     sa.Column('status_code', sa.Integer(), nullable=True),
+    sa.Column('error_message', sa.Text(), nullable=True),
+    sa.Column('recovery_metadata', postgresql.JSONB(astext_type=Text()).with_variant(sa.JSON(), 'sqlite'), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
     sa.ForeignKeyConstraint(['consumer_id'], ['consumers.id'], ondelete='CASCADE'),

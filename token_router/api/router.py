@@ -8,6 +8,12 @@ from token_router.db.session import get_db
 from token_router.models.entities import Consumer
 from token_router.schemas.contracts import RouteRequest, RouteResponse
 from token_router.services.approvals import PersistentApprovalManager
+from token_router.services.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyExecutionFailedError,
+    IdempotencyPayloadMismatchError,
+    IdempotencyUncertainError,
+)
 from token_router.services.router_service import TokenRouterService
 
 router = APIRouter(prefix="/api/v1", tags=["Routing & Capabilities"])
@@ -34,6 +40,8 @@ async def create_approval_request(
         payload=payload.get("payload", {}),
         provider_name=payload.get("provider"),
         target_id=payload.get("target_id"),
+        amount=payload.get("amount"),
+        currency=payload.get("currency"),
         risk_level=payload.get("risk_level", "high"),
     )
     return {
@@ -146,12 +154,18 @@ async def route_request(
             approval_id=payload.approval_id,
         )
         return RouteResponse(**result)
+    except IdempotencyConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except (IdempotencyPayloadMismatchError, ValueError, TimeoutError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except IdempotencyExecutionFailedError as e:
+        raise HTTPException(status_code=e.status_code or status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except IdempotencyUncertainError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except (ValueError, TimeoutError) as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except Exception as e:

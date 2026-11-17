@@ -129,7 +129,10 @@ class MCPServer:
                     description=arguments["description"],
                     requester=arguments["requester"],
                     payload=arguments.get("payload", {}),
+                    provider_name=arguments.get("provider"),
                     target_id=arguments.get("target_id"),
+                    amount=arguments.get("amount"),
+                    currency=arguments.get("currency"),
                 )
                 return {
                     "operation_id": req.id,
