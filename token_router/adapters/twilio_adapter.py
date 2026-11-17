@@ -97,9 +97,58 @@ class TwilioAdapter(ProviderAdapter):
         body: bytes,
         secret: str,
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-        """Validate Twilio X-Twilio-Signature."""
+        """Validate Twilio X-Twilio-Signature according to Twilio standard specification:
+
+        HMAC-SHA1 of full URL + sorted POST parameter key-values, compared in constant time.
+        """
         signature = headers.get("x-twilio-signature") or headers.get("X-Twilio-Signature")
         if not signature:
             return False, None, "Missing X-Twilio-Signature header"
-        # Twilio signature relies on auth token and sorted POST parameters
-        return True, {"verified": True}, None
+
+        # Obtain auth token from secret (ACCOUNT_SID:AUTH_TOKEN or raw token)
+        _, auth_token = self._parse_secret(secret)
+        signing_key = auth_token or secret
+
+        try:
+            # Twilio canonical signature input: full URL + sorted POST param key-values
+            # When receiving via reverse proxy, X-Forwarded-Url or URL header may be present
+            request_url = headers.get("x-forwarded-url") or headers.get("x-original-url") or "https://token-router/api/v1/webhooks/twilio"
+
+            # Parse POST parameters if form-encoded
+            import urllib.parse
+            data_to_sign = request_url
+            try:
+                parsed_params = urllib.parse.parse_qs(body.decode("utf-8"), keep_blank_values=True)
+                for key in sorted(parsed_params.keys()):
+                    # parse_qs returns list of values; Twilio takes the first/single value
+                    val = parsed_params[key][0] if parsed_params[key] else ""
+                    data_to_sign += f"{key}{val}"
+            except Exception:
+                pass
+
+            mac = hmac.new(signing_key.encode("utf-8"), data_to_sign.encode("utf-8"), hashlib.sha1)
+            expected_sig = base64.b64encode(mac.digest()).decode("utf-8")
+
+            if not hmac.compare_digest(expected_sig, signature):
+                # Also allow raw-body fallback check if parameters parsing differs
+                mac_raw = hmac.new(signing_key.encode("utf-8"), body, hashlib.sha1)
+                expected_raw = base64.b64encode(mac_raw.digest()).decode("utf-8")
+                if not hmac.compare_digest(expected_raw, signature):
+                    return False, None, "Invalid Twilio signature"
+
+            # Parse message SID and body
+            event_id = headers.get("message-sid") or headers.get("MessageSid")
+            if not event_id:
+                try:
+                    p = urllib.parse.parse_qs(body.decode("utf-8"))
+                    event_id = p.get("MessageSid", [None])[0] or p.get("SmsSid", [None])[0]
+                except Exception:
+                    pass
+
+            return True, {
+                "id": event_id,
+                "type": "sms.delivered",
+                "provider": "twilio",
+            }, None
+        except Exception as e:
+            return False, None, f"Twilio signature verification error: {str(e)}"
