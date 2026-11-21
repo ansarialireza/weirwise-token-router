@@ -95,7 +95,9 @@ class BudgetManager:
                 f"${cur} + estimated ${estimated_cost} > limit ${lim}"
             )
 
-        # Refresh in-session consumer object
+        # Durably commit reservation before upstream dispatch so concurrent transactions observe updated spend
+        await db.commit()
+        # Refresh in-session consumer object from database to keep identity map in sync
         await db.refresh(consumer)
         return True
 
