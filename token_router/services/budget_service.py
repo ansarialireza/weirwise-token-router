@@ -67,10 +67,36 @@ class BudgetManager:
                     f"${cur_spend} + estimated ${estimated_cost} > limit ${budget_limit}"
                 )
 
-        # Update consumer instance directly in session so identity map is consistent
-        consumer.current_month_spend_usd = cur_spend + estimated_cost
-        consumer.updated_at = now
-        await db.flush()
+        # Row-level conditional update guaranteeing atomic concurrency enforcement:
+        # UPDATE consumers
+        # SET current_month_spend_usd = current_month_spend_usd + :estimated_cost, updated_at = :now
+        # WHERE id = :consumer_id AND (monthly_budget_usd <= 0 OR current_month_spend_usd + :estimated_cost <= monthly_budget_usd)
+        stmt = (
+            update(Consumer)
+            .where(
+                Consumer.id == consumer_id,
+                (Consumer.monthly_budget_usd <= Decimal("0.0"))
+                | ((Consumer.current_month_spend_usd + estimated_cost) <= Consumer.monthly_budget_usd),
+            )
+            .values(
+                current_month_spend_usd=Consumer.current_month_spend_usd + estimated_cost,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        res = await db.execute(stmt)
+        if res.rowcount == 0:
+            # Query current spend to raise detailed exception
+            c_current = await db.get(Consumer, consumer_id)
+            cur = Decimal(str(c_current.current_month_spend_usd or 0.0)) if c_current else cur_spend
+            lim = Decimal(str(c_current.monthly_budget_usd or 0.0)) if c_current else budget_limit
+            raise BudgetExceededError(
+                f"Consumer '{consumer.name}' monthly budget exceeded: "
+                f"${cur} + estimated ${estimated_cost} > limit ${lim}"
+            )
+
+        # Refresh in-session consumer object
+        await db.refresh(consumer)
         return True
 
     @classmethod
@@ -80,7 +106,7 @@ class BudgetManager:
         consumer_id: str,
         estimated_cost: Decimal,
     ) -> None:
-        """Safely rolls back estimated cost upon confirmed pre-dispatch failure."""
+        """Safely rolls back estimated cost upon confirmed pre-dispatch failure using atomic decrement."""
         if estimated_cost <= Decimal("0.0"):
             return
 
@@ -99,7 +125,7 @@ class BudgetManager:
         estimated_cost: Decimal,
         actual_cost: Decimal,
     ) -> Decimal:
-        """Reconciles estimated spend reservation with actual token spend post-execution."""
+        """Reconciles estimated spend reservation with actual token spend post-execution using atomic delta update."""
         diff = actual_cost - estimated_cost
         if diff == Decimal("0.0"):
             return actual_cost
