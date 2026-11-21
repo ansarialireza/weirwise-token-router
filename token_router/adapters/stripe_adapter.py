@@ -12,6 +12,7 @@ from typing import Any, Dict, Tuple, Optional
 import httpx
 
 from token_router.adapters.base import ProviderAdapter
+from token_router.core.http import get_http_client
 
 
 class StripeAdapter(ProviderAdapter):
@@ -20,17 +21,17 @@ class StripeAdapter(ProviderAdapter):
 
     async def validate_credential(self, secret: str) -> Tuple[bool, str, int]:
         """Validate Stripe Secret Key against /v1/balance endpoint."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                resp = await client.get(
-                    f"{self.base_url}/balance",
-                    headers={"Authorization": f"Bearer {secret}"},
-                )
-                if resp.status_code == 200:
-                    return True, "Stripe secret key valid and balance accessible", 200
-                return False, f"Stripe validation failed: {resp.text}", resp.status_code
-            except Exception as e:
-                return False, f"Stripe validation connection error: {str(e)}", 503
+        client = await get_http_client(timeout=10.0)
+        try:
+            resp = await client.get(
+                f"{self.base_url}/balance",
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+            if resp.status_code == 200:
+                return True, "Stripe secret key valid and balance accessible", 200
+            return False, f"Stripe validation failed: {resp.text}", resp.status_code
+        except Exception as e:
+            return False, f"Stripe validation connection error: {str(e)}", 503
 
     async def execute_request(
         self,
@@ -64,59 +65,62 @@ class StripeAdapter(ProviderAdapter):
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                if operation == "create_payment_intent":
-                    # Form-encoded Stripe payload
-                    form_data = {
-                        "amount": payload.get("amount"),
-                        "currency": payload.get("currency", "usd"),
-                    }
-                    if "customer" in payload:
-                        form_data["customer"] = payload["customer"]
-                    if "payment_method" in payload:
-                        form_data["payment_method"] = payload["payment_method"]
-                    if payload.get("confirm"):
-                        form_data["confirm"] = "true"
+        client = await get_http_client(timeout=timeout)
+        try:
+            if operation == "create_payment_intent":
+                # Form-encoded Stripe payload
+                form_data = {
+                    "amount": payload.get("amount"),
+                    "currency": payload.get("currency", "usd"),
+                }
+                if "customer" in payload:
+                    form_data["customer"] = payload["customer"]
+                if "payment_method" in payload:
+                    form_data["payment_method"] = payload["payment_method"]
+                if payload.get("confirm"):
+                    form_data["confirm"] = "true"
 
-                    resp = await client.post(
-                        f"{self.base_url}/payment_intents",
-                        data=form_data,
-                        headers=headers,
-                    )
-                    data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
-                    return resp.status_code, data, {"transactions": 1}
+                resp = await client.post(
+                    f"{self.base_url}/payment_intents",
+                    data=form_data,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
+                return resp.status_code, data, {"transactions": 1}
 
-                elif operation == "refund_payment":
-                    form_data = {"payment_intent": payload.get("payment_intent")}
-                    if "amount" in payload:
-                        form_data["amount"] = payload["amount"]
-                    resp = await client.post(
-                        f"{self.base_url}/refunds",
-                        data=form_data,
-                        headers=headers,
-                    )
-                    data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
-                    return resp.status_code, data, {"transactions": 1}
+            elif operation == "refund_payment":
+                form_data = {"payment_intent": payload.get("payment_intent")}
+                if "amount" in payload:
+                    form_data["amount"] = payload["amount"]
+                resp = await client.post(
+                    f"{self.base_url}/refunds",
+                    data=form_data,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
+                return resp.status_code, data, {"transactions": 1}
 
-                elif operation == "get_balance":
-                    resp = await client.get(
-                        f"{self.base_url}/balance",
-                        headers=headers,
-                    )
-                    data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
-                    return resp.status_code, data, {"queries": 1}
+            elif operation == "get_balance":
+                resp = await client.get(
+                    f"{self.base_url}/balance",
+                    headers=headers,
+                    timeout=timeout,
+                )
+                data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
+                return resp.status_code, data, {"queries": 1}
 
-                else:
-                    return 400, {"error": f"Unsupported Stripe operation: {operation}"}, {}
+            else:
+                return 400, {"error": f"Unsupported Stripe operation: {operation}"}, {}
 
-            except httpx.TimeoutException:
-                # CRITICAL: Note that transaction status is unknown!
-                return 504, {
-                    "error": "Stripe gateway timeout. Transaction status UNCERTAIN. DO NOT retry automatically without balance/intent verification."
-                }, {}
-            except Exception as e:
-                return 502, {"error": f"Stripe gateway communication error: {str(e)}"}, {}
+        except httpx.TimeoutException:
+            # CRITICAL: Note that transaction status is unknown!
+            return 504, {
+                "error": "Stripe gateway timeout. Transaction status UNCERTAIN. DO NOT retry automatically without balance/intent verification."
+            }, {}
+        except Exception as e:
+            return 502, {"error": f"Stripe gateway communication error: {str(e)}"}, {}
 
     async def verify_webhook(
         self,

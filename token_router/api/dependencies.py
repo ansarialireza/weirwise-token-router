@@ -1,6 +1,7 @@
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from token_router.core.cache import auth_cache
 from token_router.core.config import settings
 from token_router.core.vault import hash_token
 from token_router.db.session import get_db
@@ -12,7 +13,7 @@ async def authenticate_consumer(
     authorization: str = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ) -> Consumer:
-    """Authenticates the consumer application via X-Consumer-Key or Bearer token."""
+    """Authenticates the consumer application via X-Consumer-Key or Bearer token with TTL caching."""
     raw_key = x_consumer_key
     if not raw_key and authorization:
         parts = authorization.split()
@@ -26,6 +27,15 @@ async def authenticate_consumer(
         )
 
     key_hash = hash_token(raw_key)
+
+    # 1. Check in-memory auth cache (hash -> consumer dict)
+    cached_consumer_id = await auth_cache.get(key_hash)
+    if cached_consumer_id:
+        consumer = await db.get(Consumer, cached_consumer_id)
+        if consumer and consumer.is_active:
+            return consumer
+
+    # 2. Authoritative Database lookup
     stmt = (
         select(ConsumerApiKey)
         .where(ConsumerApiKey.key_hash == key_hash, ConsumerApiKey.is_active.is_(True))
@@ -45,6 +55,8 @@ async def authenticate_consumer(
             detail="Consumer account is disabled or inactive.",
         )
 
+    # Cache consumer id on successful verification
+    await auth_cache.set(key_hash, consumer.id, ttl_seconds=getattr(settings, "AUTH_CACHE_TTL_SECONDS", 30))
     return consumer
 
 

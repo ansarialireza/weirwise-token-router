@@ -7,6 +7,7 @@ from token_router.api.admin import admin_router
 from token_router.api.router import router as routing_router
 from token_router.api.webhooks import router as webhooks_router
 from token_router.core.config import settings
+from token_router.core.http import close_http_client, get_http_client
 from token_router.db.session import async_session_factory, engine, init_db
 from token_router.services.webhook_service import WebhookWorker
 
@@ -19,12 +20,16 @@ async def lifespan(app: FastAPI):
     settings.validate_production_secrets()
     # Initialize DB tables
     await init_db()
+    # Warm up shared HTTP connection pool
+    await get_http_client()
     # Start background webhook processor
     webhook_worker.start()
     yield
     # Stop background worker
     await webhook_worker.stop()
-    # Graceful shutdown
+    # Close shared pooled HTTP clients gracefully
+    await close_http_client()
+    # Graceful shutdown of DB engine
     await engine.dispose()
 
 

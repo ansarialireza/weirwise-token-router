@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from token_router.adapters.registry import get_adapter, list_supported_providers
 from token_router.api.dependencies import authenticate_admin
+from token_router.core.cache import auth_cache, metadata_cache
 from token_router.core.vault import generate_api_key, hash_token, mask_credential, vault
 from token_router.db.session import get_db
 from token_router.models.entities import Consumer, ConsumerApiKey, Provider, ProviderCredential, UsageRecord
@@ -180,6 +181,7 @@ async def emergency_stop_provider(provider_id: str, db: AsyncSession = Depends(g
 
     provider.is_enabled = False
     await db.commit()
+    await metadata_cache.clear()
     return {"status": "disabled", "provider": provider.name}
 
 

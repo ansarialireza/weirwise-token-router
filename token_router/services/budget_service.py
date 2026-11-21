@@ -70,7 +70,7 @@ class BudgetManager:
         # Update consumer instance directly in session so identity map is consistent
         consumer.current_month_spend_usd = cur_spend + estimated_cost
         consumer.updated_at = now
-        await db.commit()
+        await db.flush()
         return True
 
     @classmethod
@@ -87,14 +87,8 @@ class BudgetManager:
         c = await db.get(Consumer, consumer_id)
         if c:
             cur = Decimal(str(c.current_month_spend_usd or 0.0))
-            new_val = max(Decimal("0.0"), cur - estimated_cost)
-            stmt = (
-                update(Consumer)
-                .where(Consumer.id == consumer_id)
-                .values(current_month_spend_usd=new_val, updated_at=datetime.now(UTC))
-                .execution_options(synchronize_session=False)
-            )
-            await db.execute(stmt)
+            c.current_month_spend_usd = max(Decimal("0.0"), cur - estimated_cost)
+            c.updated_at = datetime.now(UTC)
             await db.commit()
 
     @classmethod
@@ -115,5 +109,5 @@ class BudgetManager:
             cur = Decimal(str(c.current_month_spend_usd or 0.0))
             c.current_month_spend_usd = max(Decimal("0.0"), cur + diff)
             c.updated_at = datetime.now(UTC)
-            await db.commit()
+            await db.flush()
         return actual_cost

@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 
 from token_router.adapters.base import ProviderAdapter
+from token_router.core.http import get_http_client
 
 
 class TwilioAdapter(ProviderAdapter):
@@ -36,17 +37,18 @@ class TwilioAdapter(ProviderAdapter):
         if not account_sid or not auth_token:
             return False, "Twilio credential must be in format ACCOUNT_SID:AUTH_TOKEN", 400
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                resp = await client.get(
-                    f"{self.base_url}/Accounts/{account_sid}.json",
-                    auth=(account_sid, auth_token),
-                )
-                if resp.status_code == 200:
-                    return True, "Twilio account validated successfully", 200
-                return False, f"Twilio validation failed: {resp.text}", resp.status_code
-            except Exception as e:
-                return False, f"Twilio connection error: {str(e)}", 503
+        client = await get_http_client(timeout=10.0)
+        try:
+            resp = await client.get(
+                f"{self.base_url}/Accounts/{account_sid}.json",
+                auth=(account_sid, auth_token),
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                return True, "Twilio account validated successfully", 200
+            return False, f"Twilio validation failed: {resp.text}", resp.status_code
+        except Exception as e:
+            return False, f"Twilio connection error: {str(e)}", 503
 
     async def execute_request(
         self,
@@ -82,23 +84,24 @@ class TwilioAdapter(ProviderAdapter):
             if not to or not body:
                 return 400, {"error": "Twilio SMS requires 'to' and 'body' fields"}, {}
 
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                data = {"To": to, "Body": body}
-                if from_num:
-                    data["From"] = from_num
+            client = await get_http_client(timeout=timeout)
+            data = {"To": to, "Body": body}
+            if from_num:
+                data["From"] = from_num
 
-                try:
-                    resp = await client.post(
-                        f"{self.base_url}/Accounts/{account_sid}/Messages.json",
-                        auth=(account_sid, auth_token),
-                        data=data,
-                    )
-                    resp_json = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
-                    return resp.status_code, resp_json, {"messages": 1, "segments": 1}
-                except httpx.TimeoutException:
-                    return 504, {"error": f"Twilio gateway timeout dispatching SMS to {to}"}, {}
-                except Exception as e:
-                    return 502, {"error": f"Twilio communication failure: {str(e)}"}, {}
+            try:
+                resp = await client.post(
+                    f"{self.base_url}/Accounts/{account_sid}/Messages.json",
+                    auth=(account_sid, auth_token),
+                    data=data,
+                    timeout=timeout,
+                )
+                resp_json = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
+                return resp.status_code, resp_json, {"messages": 1, "segments": 1}
+            except httpx.TimeoutException:
+                return 504, {"error": f"Twilio gateway timeout dispatching SMS to {to}"}, {}
+            except Exception as e:
+                return 502, {"error": f"Twilio communication failure: {str(e)}"}, {}
 
         return 400, {"error": f"Unsupported Twilio operation: {operation}"}, {}
 

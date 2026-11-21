@@ -1,6 +1,7 @@
 import httpx
 from typing import Any, AsyncGenerator, Dict, Tuple
 from token_router.adapters.base import ProviderAdapter
+from token_router.core.http import get_http_client
 
 
 class ResendAdapter(ProviderAdapter):
@@ -17,24 +18,24 @@ class ResendAdapter(ProviderAdapter):
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (compatible; WeirwiseTokenRouter/1.0)",
         }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                resp = await client.post(
-                    f"{self.base_url}/emails",
-                    headers=headers,
-                    json={},
-                )
-                if resp.status_code == 422:
-                    return True, "Credential valid and active (sending permission verified)", 200
-                elif resp.status_code == 200:
-                    return True, "Credential valid and active", 200
-                elif resp.status_code == 401:
-                    return False, "Authentication failed: invalid Resend API key", 401
-                elif resp.status_code == 403:
-                    return False, "Access forbidden or restricted", 403
-                return False, f"Provider returned status {resp.status_code}", resp.status_code
-            except Exception as e:
-                return False, f"Connection error: {str(e)}", 502
+        client = await get_http_client(timeout=10.0)
+        try:
+            resp = await client.post(
+                f"{self.base_url}/emails",
+                headers=headers,
+                json={},
+            )
+            if resp.status_code == 422:
+                return True, "Credential valid and active (sending permission verified)", 200
+            elif resp.status_code == 200:
+                return True, "Credential valid and active", 200
+            elif resp.status_code == 401:
+                return False, "Authentication failed: invalid Resend API key", 401
+            elif resp.status_code == 403:
+                return False, "Access forbidden or restricted", 403
+            return False, f"Provider returned status {resp.status_code}", resp.status_code
+        except Exception as e:
+            return False, f"Connection error: {str(e)}", 502
 
     async def execute_request(
         self,
@@ -44,14 +45,15 @@ class ResendAdapter(ProviderAdapter):
         payload: Dict[str, Any],
         timeout: float,
     ) -> Tuple[int, Dict[str, Any], Dict[str, int]]:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/emails",
-                headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
-                json=payload,
-            )
-            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"raw": resp.text}
-            return resp.status_code, data, {"total_tokens": 1}
+        client = await get_http_client(timeout=timeout)
+        resp = await client.post(
+            f"{self.base_url}/emails",
+            headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout,
+        )
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"raw": resp.text}
+        return resp.status_code, data, {"total_tokens": 1}
 
     async def execute_stream(
         self,

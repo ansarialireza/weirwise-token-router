@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
     CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 60
 
+    # HTTP Connection Pooling & Keep-Alive Settings
+    HTTP_MAX_CONNECTIONS: int = 200
+    HTTP_MAX_KEEPALIVE: int = 50
+    HTTP_KEEPALIVE_EXPIRY: float = 60.0
+
+    # In-Memory Cache TTL Settings
+    AUTH_CACHE_TTL_SECONDS: int = 30
+    AUTH_CACHE_MAX_SIZE: int = 1000
+    METADATA_CACHE_TTL_SECONDS: int = 60
+
     # Trusted Reverse Proxy configuration for public webhook URL determination
     # Only if client IP is in TRUSTED_PROXIES will X-Forwarded-Proto / X-Forwarded-Host be honored.
     TRUSTED_PROXIES: List[str] = ["127.0.0.1", "::1"]

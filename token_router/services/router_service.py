@@ -288,6 +288,12 @@ class TokenRouterService:
                         tokens_used=total_tok if status_code < 400 else 0,
                         rate_limit_info=parsed_limits,
                     )
+                    # Update in-memory EWMA performance statistics
+                    RoutingEngine.record_latency_and_success(
+                        credential_id=cred.id,
+                        latency_ms=duration_ms,
+                        is_success=(status_code < 400),
+                    )
 
                     if status_code < 400:
                         # Calculate granular estimated cost
@@ -387,6 +393,11 @@ class TokenRouterService:
                         credential=cred,
                         status_code=500,
                         error_message=str(e),
+                    )
+                    RoutingEngine.record_latency_and_success(
+                        credential_id=cred.id,
+                        latency_ms=1000.0,
+                        is_success=False,
                     )
                     last_error = {"error": str(e)}
                     if not allows_failover:

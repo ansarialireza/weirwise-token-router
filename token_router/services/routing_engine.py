@@ -13,6 +13,7 @@ Selects the optimal healthy credential for a given capability, prioritizing:
 
 import asyncio
 import random
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -25,8 +26,35 @@ from token_router.core.rate_limits import ParsedRateLimit
 from token_router.models.entities import Provider, ProviderCredential
 
 
+# In-memory EWMA latency & success rate metrics per credential
+# cred_id -> {"latency_ewma": float, "success_rate": float, "last_updated": float}
+_RUNTIME_METRICS: Dict[str, Dict[str, float]] = {}
+
+
 class RoutingEngine:
     """Selects the optimal healthy credential for a given provider and capability."""
+
+    @classmethod
+    def record_latency_and_success(cls, credential_id: str, latency_ms: float, is_success: bool) -> None:
+        """Updates lightweight in-memory Exponential Moving Average (EWMA) metrics."""
+        alpha = 0.2  # Smoothing factor
+        now = time.time() if "time" in globals() else datetime.now(UTC).timestamp()
+        if credential_id not in _RUNTIME_METRICS:
+            _RUNTIME_METRICS[credential_id] = {
+                "latency_ewma": float(latency_ms),
+                "success_rate": 1.0 if is_success else 0.0,
+                "last_updated": now,
+            }
+        else:
+            m = _RUNTIME_METRICS[credential_id]
+            m["latency_ewma"] = (alpha * latency_ms) + ((1.0 - alpha) * m["latency_ewma"])
+            succ_val = 1.0 if is_success else 0.0
+            m["success_rate"] = (alpha * succ_val) + ((1.0 - alpha) * m["success_rate"])
+            m["last_updated"] = now
+
+    @classmethod
+    def get_runtime_metrics(cls, credential_id: str) -> Dict[str, float]:
+        return _RUNTIME_METRICS.get(credential_id, {"latency_ewma": 100.0, "success_rate": 1.0, "last_updated": 0.0})
 
     @staticmethod
     def _is_eligible_basic(cred: ProviderCredential, now: datetime) -> bool:
@@ -147,6 +175,14 @@ class RoutingEngine:
         elif effective_strategy == "least_recently_used":
             return sorted(effective_pool, key=lambda c: (c.last_used_at or datetime.min.replace(tzinfo=UTC)))[0]
 
+        elif effective_strategy == "latency_optimized":
+            # Sort by lowest EWMA latency, breaking ties with priority
+            return sorted(effective_pool, key=lambda c: (cls.get_runtime_metrics(c.id)["latency_ewma"], c.priority))[0]
+
+        elif effective_strategy == "reliability_optimized":
+            # Sort by highest success rate and lowest consecutive failures
+            return sorted(effective_pool, key=lambda c: (-cls.get_runtime_metrics(c.id)["success_rate"], c.consecutive_failures, c.priority))[0]
+
         elif effective_strategy == "weighted":
             total_weight = sum(max(c.routing_weight, 1) for c in effective_pool)
             r = random.uniform(0, total_weight)
@@ -215,4 +251,4 @@ class RoutingEngine:
             credential.last_error_reason = error_message or f"HTTP {status_code}"
             credential.last_error_code = status_code
 
-        await db.commit()
+        await db.flush()
