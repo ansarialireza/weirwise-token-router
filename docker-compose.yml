@@ -12,10 +12,31 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - VAULT_MASTER_KEY=${VAULT_MASTER_KEY}
       - ADMIN_API_KEY=${ADMIN_API_KEY}
-      - REDIS_URL=${REDIS_URL}
+      - REDIS_URL=${REDIS_URL:-redis://token-router-redis:6379/0}
+      - DISTRIBUTED_MODE=${DISTRIBUTED_MODE:-false}
+      - QUOTA_FAILURE_POLICY=${QUOTA_FAILURE_POLICY:-local_fallback}
     depends_on:
       token-router-db:
         condition: service_healthy
+      token-router-redis:
+        condition: service_healthy
+    networks:
+      - router-network
+
+  token-router-redis:
+    image: redis:7-alpine
+    container_name: weirwise-token-router-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "900 1 300 10 60 10000", "--maxmemory", "100mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - token_router_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - router-network
 
@@ -39,6 +60,7 @@ services:
 
 volumes:
   token_router_data:
+  token_router_redis_data:
 
 networks:
   router-network:

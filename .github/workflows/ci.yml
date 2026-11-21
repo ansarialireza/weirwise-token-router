@@ -8,8 +8,34 @@ on:
 
 jobs:
   test:
-    name: Unit & Integration Tests
+    name: Unit & Integration Tests (PostgreSQL & Redis)
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_postgres_pass
+          POSTGRES_DB: test_token_router
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -23,12 +49,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install .
-          pip install pytest pytest-asyncio pytest-cov httpx cryptography
+          pip install pytest pytest-asyncio pytest-cov httpx cryptography asyncpg redis
 
       - name: Run Pytest Suite
         env:
           ENVIRONMENT: test
           ADMIN_API_KEY: wtr_ci_admin_key_1234567890
           VAULT_MASTER_KEY: wtr_ci_vault_master_key_1234567890_32b
+          REDIS_URL: redis://127.0.0.1:6379/0
+          PG_TEST_URL: postgresql+asyncpg://test_user:test_postgres_pass@127.0.0.1:5433/test_token_router
         run: |
           PYTHONPATH=. pytest tests -v

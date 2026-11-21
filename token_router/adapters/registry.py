@@ -4,6 +4,7 @@ from token_router.adapters.base import ProviderAdapter
 from token_router.adapters.deepgram_adapter import DeepgramAdapter
 from token_router.adapters.gemini_adapter import GeminiAdapter
 from token_router.adapters.jina_adapter import JinaAdapter
+from token_router.adapters.local_adapter import LocalAdapter
 from token_router.adapters.openai_adapter import OpenAIAdapter
 from token_router.adapters.openrouter_adapter import OpenRouterAdapter
 from token_router.adapters.resend_adapter import ResendAdapter
@@ -17,6 +18,7 @@ _ADAPTER_REGISTRY: Dict[str, ProviderAdapter] = {
     "anthropic": AnthropicAdapter(),
     "gemini": GeminiAdapter(),
     "openrouter": OpenRouterAdapter(),
+    "local": LocalAdapter(),
     "deepgram": DeepgramAdapter(),
     "jina": JinaAdapter(),
     "jina_search": JinaAdapter(),

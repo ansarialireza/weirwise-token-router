@@ -32,7 +32,24 @@ class GeminiAdapter(ProviderAdapter):
         payload: Dict[str, Any],
         timeout: float,
     ) -> Tuple[int, Dict[str, Any], Dict[str, int]]:
-        actual_model = model if model != "auto" else "gemini-1.5-flash"
+        code, data, tokens, _ = await self.execute_request_with_headers(
+            secret=secret,
+            capability=capability,
+            model=model,
+            payload=payload,
+            timeout=timeout,
+        )
+        return code, data, tokens
+
+    async def execute_request_with_headers(
+        self,
+        secret: str,
+        capability: str,
+        model: str,
+        payload: Dict[str, Any],
+        timeout: float,
+    ) -> Tuple[int, Dict[str, Any], Dict[str, int], Dict[str, str]]:
+        actual_model = model if model != "auto" else "gemini-3.5-flash-lite"
         endpoint = f"{self.base_url}/models/{actual_model}:generateContent"
 
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -48,7 +65,7 @@ class GeminiAdapter(ProviderAdapter):
                 "output_tokens": usage.get("candidatesTokenCount", 0),
                 "total_tokens": usage.get("totalTokenCount", 0),
             }
-            return resp.status_code, data, tokens
+            return resp.status_code, data, tokens, dict(resp.headers)
 
     async def execute_stream(
         self,
@@ -58,7 +75,7 @@ class GeminiAdapter(ProviderAdapter):
         payload: Dict[str, Any],
         timeout: float,
     ) -> AsyncGenerator[str, None]:
-        actual_model = model if model != "auto" else "gemini-1.5-flash"
+        actual_model = model if model != "auto" else "gemini-3.5-flash-lite"
         endpoint = f"{self.base_url}/models/{actual_model}:streamGenerateContent?alt=sse"
 
         async with httpx.AsyncClient(timeout=timeout) as client:

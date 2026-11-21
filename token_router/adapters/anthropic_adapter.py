@@ -10,7 +10,6 @@ class AnthropicAdapter(ProviderAdapter):
     async def validate_credential(self, secret: str) -> Tuple[bool, str, int]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
-                # Anthropic /v1/models endpoint requires anthropic-version
                 resp = await client.get(
                     f"{self.base_url}/models",
                     headers={"x-api-key": secret, "anthropic-version": "2023-06-01"},
@@ -33,6 +32,23 @@ class AnthropicAdapter(ProviderAdapter):
         payload: Dict[str, Any],
         timeout: float,
     ) -> Tuple[int, Dict[str, Any], Dict[str, int]]:
+        code, data, tokens, _ = await self.execute_request_with_headers(
+            secret=secret,
+            capability=capability,
+            model=model,
+            payload=payload,
+            timeout=timeout,
+        )
+        return code, data, tokens
+
+    async def execute_request_with_headers(
+        self,
+        secret: str,
+        capability: str,
+        model: str,
+        payload: Dict[str, Any],
+        timeout: float,
+    ) -> Tuple[int, Dict[str, Any], Dict[str, int], Dict[str, str]]:
         req_payload = dict(payload)
         if model != "auto":
             req_payload["model"] = model
@@ -59,7 +75,7 @@ class AnthropicAdapter(ProviderAdapter):
                 "output_tokens": usage.get("output_tokens", 0),
                 "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             }
-            return resp.status_code, data, tokens
+            return resp.status_code, data, tokens, dict(resp.headers)
 
     async def execute_stream(
         self,

@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Optional Redis for distributed state / rate limiting
     REDIS_URL: Optional[str] = None
 
+    # Distributed Quota Failure Policy: "fail_closed" (default for distributed production)
+    # or "local_fallback" (only for single-instance setups where independent local state is acceptable)
+    DISTRIBUTED_MODE: bool = False  # Set to True when multiple router instances are deployed
+    QUOTA_FAILURE_POLICY: str = "local_fallback"  # "fail_closed" or "local_fallback"
+    REQUIRE_REDIS_PERSISTENCE: bool = False  # When True, startup checks verify Redis AOF is active
+
     # Allowed CORS Origins
     ALLOWED_ORIGINS: List[str] = ["*"]
 
@@ -60,6 +66,8 @@ class Settings(BaseSettings):
                 errors.append("ADMIN_API_KEY must be configured with a secure high-entropy string in production.")
             if "sqlite" in self.DATABASE_URL.lower():
                 errors.append("DATABASE_URL must be a production PostgreSQL database, not SQLite.")
+            if self.DISTRIBUTED_MODE and not self.REDIS_URL:
+                errors.append("REDIS_URL must be configured when DISTRIBUTED_MODE=true.")
             if errors:
                 raise RuntimeError(f"FATAL: Insecure production configuration:\n" + "\n".join(f"- {e}" for e in errors))
 

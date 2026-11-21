@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, datetime
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,3 +181,24 @@ async def emergency_stop_provider(provider_id: str, db: AsyncSession = Depends(g
     provider.is_enabled = False
     await db.commit()
     return {"status": "disabled", "provider": provider.name}
+
+
+# --- Pricing & Quota Management ---
+from token_router.core.pricing import ModelPricing, PricingRegistry
+from token_router.core.quota import QuotaManager
+
+
+@admin_router.get("/pricing", response_model=List[ModelPricing])
+async def list_admin_pricing(provider: Optional[str] = None):
+    return PricingRegistry.list_pricing(provider=provider)
+
+
+@admin_router.post("/pricing", response_model=ModelPricing, status_code=status.HTTP_201_CREATED)
+async def update_or_create_pricing(payload: ModelPricing):
+    PricingRegistry.register_model_pricing(payload)
+    return payload
+
+
+@admin_router.get("/credentials/{credential_id}/quotas")
+async def get_admin_credential_quota(credential_id: str):
+    return await QuotaManager.get_credential_metrics(credential_id)

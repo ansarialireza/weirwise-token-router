@@ -170,3 +170,22 @@ async def route_request(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Routing failure: {str(e)}")
+
+
+@router.get("/pricing")
+async def get_pricing_catalog(
+    provider: Optional[str] = Query(None, description="Filter by provider name"),
+):
+    """Retrieve the model pricing catalog with input/output token rates and free-tier designations."""
+    from token_router.core.pricing import PricingRegistry
+    return [p.model_dump() for p in PricingRegistry.list_pricing(provider=provider)]
+
+
+@router.get("/quotas/{credential_id}")
+async def get_credential_quota_status(
+    credential_id: str,
+    consumer: Consumer = Depends(authenticate_consumer),
+):
+    """Inspect live RPM, TPM, and RPD window metrics for a credential."""
+    from token_router.core.quota import QuotaManager
+    return await QuotaManager.get_credential_metrics(credential_id)

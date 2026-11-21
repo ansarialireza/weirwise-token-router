@@ -32,6 +32,23 @@ class OpenRouterAdapter(ProviderAdapter):
         payload: Dict[str, Any],
         timeout: float,
     ) -> Tuple[int, Dict[str, Any], Dict[str, int]]:
+        code, data, tokens, _ = await self.execute_request_with_headers(
+            secret=secret,
+            capability=capability,
+            model=model,
+            payload=payload,
+            timeout=timeout,
+        )
+        return code, data, tokens
+
+    async def execute_request_with_headers(
+        self,
+        secret: str,
+        capability: str,
+        model: str,
+        payload: Dict[str, Any],
+        timeout: float,
+    ) -> Tuple[int, Dict[str, Any], Dict[str, int], Dict[str, str]]:
         req_payload = dict(payload)
         if model != "auto":
             req_payload["model"] = model
@@ -56,7 +73,7 @@ class OpenRouterAdapter(ProviderAdapter):
                 "output_tokens": usage.get("completion_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
             }
-            return resp.status_code, data, tokens
+            return resp.status_code, data, tokens, dict(resp.headers)
 
     async def execute_stream(
         self,

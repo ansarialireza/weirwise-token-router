@@ -1,9 +1,9 @@
 """Unified Application Service Layer for Token Router.
 
 Shared by REST API, MCP Server, and CLI to prevent code duplication.
-Supports universal execution across AI, Communication, Payments, and Storage.
-Enforces strict consumer/provider authorization, database-backed approvals,
-and distributed idempotency.
+Supports universal execution across AI, Communication, Payments, Storage, and Local inference.
+Enforces consumer budget constraints, free-tier intelligent routing,
+cost estimation, database-backed approvals, and distributed idempotency.
 """
 
 import time
@@ -17,6 +17,8 @@ from token_router.adapters.registry import get_adapter
 from token_router.core.capabilities import CapabilityRegistry
 from token_router.core.contracts import ExecutionEnvelope, ServiceCategory
 from token_router.core.config import settings
+from token_router.core.pricing import PricingRegistry
+from token_router.core.quota import QuotaManager
 from token_router.core.vault import generate_api_key, hash_token, mask_credential, vault
 from token_router.models.entities import Consumer, ConsumerApiKey, Provider, ProviderCredential, UsageRecord
 from token_router.services.approvals import PersistentApprovalManager
@@ -73,17 +75,42 @@ class TokenRouterService:
         if not consumer.is_active:
             raise PermissionError(f"Consumer account '{consumer.name}' is inactive or suspended.")
 
-        # 2. Enforce Consumer Capabilities Permission
+        # 2. Pre-estimate prompt tokens and cost
+        estimated_input_tokens = 200
+        if "messages" in request_payload and isinstance(request_payload["messages"], list):
+            raw_text = " ".join(str(m.get("content", "")) for m in request_payload["messages"])
+            estimated_input_tokens = max(10, len(raw_text) // 4)
+        elif "input" in request_payload:
+            estimated_input_tokens = max(10, len(str(request_payload["input"])) // 4)
+
+        estimated_initial_cost = PricingRegistry.estimate_cost(
+            provider=provider_name or "openai",
+            model=model,
+            input_tokens=estimated_input_tokens,
+            output_tokens=200,
+        )
+
+        # 3. Concurrency-Safe Atomic Budget Reservation
+        from token_router.services.budget_service import BudgetManager
+        await BudgetManager.reserve_budget(
+            db=db,
+            consumer_id=consumer.id,
+            estimated_cost=estimated_initial_cost,
+        )
+
+        # 3. Enforce Consumer Capabilities Permission
         if consumer.allowed_capabilities and "*" not in consumer.allowed_capabilities:
             if capability not in consumer.allowed_capabilities:
+                await BudgetManager.release_reservation(db=db, consumer_id=consumer.id, estimated_cost=estimated_initial_cost)
                 raise PermissionError(f"Consumer '{consumer.name}' not authorized for capability: {capability}")
 
-        # 3. Enforce Consumer Providers Permission
+        # 4. Enforce Consumer Providers Permission
         if provider_name and consumer.allowed_providers and "*" not in consumer.allowed_providers:
             if provider_name.lower() not in [p.lower() for p in consumer.allowed_providers]:
+                await BudgetManager.release_reservation(db=db, consumer_id=consumer.id, estimated_cost=estimated_initial_cost)
                 raise PermissionError(f"Consumer '{consumer.name}' not authorized to use provider: {provider_name}")
 
-        # 4. Check operation safety semantics from registry
+        # 5. Check operation safety semantics from registry
         op_def = None
         for svc in CapabilityRegistry.list_services():
             for op in svc.operations:
@@ -93,7 +120,7 @@ class TokenRouterService:
             if op_def:
                 break
 
-        # 5. Persistent Idempotency Check
+        # 6. Persistent Idempotency Check
         is_new_request = True
         idemp_rec = None
         if idempotency_key:
@@ -105,7 +132,9 @@ class TokenRouterService:
                 payload=request_payload,
             )
             if not is_new_request:
-                # ONLY status == 'succeeded' or 'completed' is allowed here (other states raise specific exceptions in acquire_or_get)
+                # Release budget reservation since request was already executed and accounted for
+                await BudgetManager.release_reservation(db=db, consumer_id=consumer.id, estimated_cost=estimated_initial_cost)
+                # ONLY status == 'succeeded' or 'completed' is allowed here
                 if idemp_rec.status not in ("succeeded", "completed"):
                     raise RuntimeError(
                         f"Non-successful idempotency status '{idemp_rec.status}' for key '{idempotency_key}'. Cached success response prohibited."
@@ -129,9 +158,8 @@ class TokenRouterService:
                     "data": idemp_rec.response_data,
                 }
 
-        # 6. ENFORCE PERSISTENT APPROVAL AT CORE EXECUTION BOUNDARY
+        # 7. ENFORCE PERSISTENT APPROVAL AT CORE EXECUTION BOUNDARY
         if op_def and op_def.safety.requires_approval:
-            # Extract target_id, amount, currency from request_payload if present
             target_id = (
                 request_payload.get("target_id")
                 or request_payload.get("transaction_id")
@@ -143,24 +171,28 @@ class TokenRouterService:
             amount = request_payload.get("amount")
             currency = request_payload.get("currency")
 
-            await PersistentApprovalManager.verify_and_consume(
-                db=db,
-                approval_id=approval_id,
-                action_type=op_def.id,
-                consumer_id=consumer.id,
-                payload=request_payload,
-                provider_name=provider_name,
-                target_id=target_id,
-                amount=amount,
-                currency=currency,
-            )
+            try:
+                await PersistentApprovalManager.verify_and_consume(
+                    db=db,
+                    approval_id=approval_id,
+                    action_type=op_def.id,
+                    consumer_id=consumer.id,
+                    payload=request_payload,
+                    provider_name=provider_name,
+                    target_id=target_id,
+                    amount=amount,
+                    currency=currency,
+                )
+            except Exception:
+                await BudgetManager.release_reservation(db=db, consumer_id=consumer.id, estimated_cost=estimated_initial_cost)
+                raise
 
         allows_failover = True
         if op_def and not op_def.safety.allows_automatic_failover:
             allows_failover = False
             max_failover_attempts = 1  # Strict: payments/financial/sms cannot fail over blindly!
 
-        # 7. Locate eligible enabled providers matching consumer allowed_providers
+        # 8. Locate eligible enabled providers matching consumer allowed_providers
         provider_stmt = select(Provider).where(Provider.is_enabled.is_(True))
         if provider_name:
             provider_stmt = provider_stmt.where(Provider.name == provider_name.lower())
@@ -175,6 +207,14 @@ class TokenRouterService:
 
         if not providers:
             raise LookupError(f"No authorized enabled provider found matching '{provider_name or 'any'}'")
+
+        # Estimate prompt tokens for cost & quota window checks
+        estimated_input_tokens = 200
+        if "messages" in request_payload and isinstance(request_payload["messages"], list):
+            raw_text = " ".join(str(m.get("content", "")) for m in request_payload["messages"])
+            estimated_input_tokens = max(10, len(raw_text) // 4)
+        elif "input" in request_payload:
+            estimated_input_tokens = max(10, len(str(request_payload["input"])) // 4)
 
         timeout = timeout_seconds or (op_def.safety.default_timeout_seconds if op_def else settings.DEFAULT_TIMEOUT_SECONDS)
         failover_attempts = 0
@@ -191,6 +231,7 @@ class TokenRouterService:
                     model=model,
                     strategy=strategy,
                     exclude_credential_ids=attempted_cred_ids,
+                    estimated_tokens=estimated_input_tokens,
                 )
                 if not cred:
                     break
@@ -199,24 +240,73 @@ class TokenRouterService:
                 secret = vault.decrypt(cred.encrypted_secret)
                 start_time = time.perf_counter()
 
+                res_id = None
                 try:
-                    status_code, response_data, usage_info = await adapter.execute_operation(
+                    # 1. Atomically reserve quota across cluster before dispatch
+                    res_ok, res_reason, wait_s, res_id = await QuotaManager.reserve_execution(
+                        credential_id=cred.id,
+                        provider=provider.name,
+                        model=model,
+                        estimated_tokens=estimated_input_tokens,
+                        credential_rpm=cred.rate_limit_rpm,
+                        credential_tpm=cred.rate_limit_tpm,
+                    )
+                    if not res_ok:
+                        # Skip this credential if quota was claimed concurrently by another worker
+                        continue
+
+                    # 2. Dispatch request to upstream provider with header extraction
+                    status_code, response_data, usage_info, resp_headers = await adapter.execute_operation_with_headers(
                         secret=secret,
                         operation=capability,
                         payload=request_payload,
                         timeout=timeout,
                         idempotency_key=idempotency_key,
+                        model=model,
                     )
                     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                    in_tok = usage_info.get("input_tokens", estimated_input_tokens)
+                    out_tok = usage_info.get("output_tokens", 0)
+                    total_tok = usage_info.get("total_tokens", in_tok + out_tok)
 
+                    # 3. Dynamic Quota Reconciliation with upstream headers
+                    parsed_limits = await QuotaManager.reconcile_from_headers(
+                        credential_id=cred.id,
+                        provider=provider.name,
+                        model=model,
+                        headers=resp_headers,
+                        status_code=status_code,
+                        response_body=response_data,
+                    )
+
+                    # 4. Update health status, circuit breaker, and cooldown
                     await RoutingEngine.handle_request_outcome(
                         db=db,
                         credential=cred,
                         status_code=status_code,
                         error_message=str(response_data) if status_code >= 400 else None,
+                        tokens_used=total_tok if status_code < 400 else 0,
+                        rate_limit_info=parsed_limits,
                     )
 
                     if status_code < 400:
+                        # Calculate granular estimated cost
+                        estimated_cost = PricingRegistry.estimate_cost(
+                            provider=provider.name,
+                            model=model,
+                            input_tokens=in_tok,
+                            output_tokens=out_tok,
+                        )
+
+                        # Reconcile budget reservation with actual cost
+                        await BudgetManager.reconcile_actual_cost(
+                            db=db,
+                            consumer_id=consumer.id,
+                            estimated_cost=estimated_initial_cost,
+                            actual_cost=estimated_cost,
+                        )
+                        cred.current_month_spend_usd = Decimal(str(cred.current_month_spend_usd or 0.0)) + estimated_cost
+
                         # Append audit log
                         usage = UsageRecord(
                             consumer_id=consumer.id,
@@ -226,11 +316,11 @@ class TokenRouterService:
                             capability=capability,
                             status="success",
                             status_code=status_code,
-                            input_tokens=usage_info.get("input_tokens", 0),
-                            output_tokens=usage_info.get("output_tokens", 0),
-                            total_tokens=usage_info.get("total_tokens", 0),
+                            input_tokens=in_tok,
+                            output_tokens=out_tok,
+                            total_tokens=total_tok,
                             latency_ms=duration_ms,
-                            estimated_cost_usd=Decimal("0.0"),
+                            estimated_cost_usd=estimated_cost,
                             failover_attempts=failover_attempts,
                         )
                         db.add(usage)
@@ -259,7 +349,7 @@ class TokenRouterService:
                             "status_code": status_code,
                             "latency_ms": duration_ms,
                             "usage": usage_info,
-                            "estimated_cost_usd": Decimal("0.0"),
+                            "estimated_cost_usd": estimated_cost,
                             "failover_attempts": failover_attempts,
                             "idempotency_key": idempotency_key,
                             "data": response_data,
@@ -270,7 +360,6 @@ class TokenRouterService:
                     last_error = response_data
                     if not allows_failover:
                         if idempotency_key:
-                            # 4xx client errors can be marked failed; 5xx / timeouts marked uncertain
                             if status_code < 500:
                                 await IdempotencyManager.mark_failed(
                                     db=db,
@@ -317,6 +406,8 @@ class TokenRouterService:
             if not allows_failover:
                 break
 
+        # If all routed attempts failed, release the initial budget reservation
+        await BudgetManager.release_reservation(db=db, consumer_id=consumer.id, estimated_cost=estimated_initial_cost)
         raise RuntimeError(f"All routed attempts failed ({last_status}): {last_error}")
 
     @classmethod
@@ -384,4 +475,5 @@ class TokenRouterService:
             "registered_credentials_count": credentials_count,
             "supported_categories": CapabilityRegistry.list_categories(),
             "universal_services_count": len(CapabilityRegistry.list_services()),
+            "pricing_entries_count": len(PricingRegistry.list_pricing()),
         }

@@ -37,19 +37,59 @@ class ProviderAdapter(abc.ABC):
         payload: Dict[str, Any],
         timeout: float,
         idempotency_key: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> Tuple[int, Dict[str, Any], Dict[str, Any]]:
         """Universal operation executor with explicit idempotency support.
 
         Default implementation falls back to execute_request for backwards compatibility.
         """
+        effective_model = model or payload.get("model") or "auto"
         status_code, data, usage = await self.execute_request(
             secret=secret,
             capability=operation,
-            model=payload.get("model", "default"),
+            model=effective_model,
             payload=payload,
             timeout=timeout,
         )
         return status_code, data, usage
+
+    async def execute_operation_with_headers(
+        self,
+        secret: str,
+        operation: str,
+        payload: Dict[str, Any],
+        timeout: float,
+        idempotency_key: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, str]]:
+        """Executes operation and returns HTTP status, response data, usage dict, and response headers.
+
+        Enables rate-limit intelligence and quota reconciliation.
+        """
+        # If execute_request or execute_operation was patched by tests, execute_operation directly
+        import inspect
+        sig = inspect.signature(self.execute_operation)
+        if "model" in sig.parameters:
+            status_code, data, usage = await self.execute_operation(
+                secret=secret,
+                operation=operation,
+                payload=payload,
+                timeout=timeout,
+                idempotency_key=idempotency_key,
+                model=model,
+            )
+        else:
+            status_code, data, usage = await self.execute_operation(
+                secret=secret,
+                operation=operation,
+                payload=payload,
+                timeout=timeout,
+                idempotency_key=idempotency_key,
+            )
+        headers = {}
+        if hasattr(self, "_last_response_headers") and self._last_response_headers:
+            headers = self._last_response_headers
+        return status_code, data, usage, headers
 
     async def execute_stream(
         self,
